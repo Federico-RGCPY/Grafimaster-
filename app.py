@@ -4,7 +4,7 @@ from datetime import datetime, date
 from streamlit_gsheets import GSheetsConnection
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE LA PÁGINA Y PREVENCIÓN DE ERRORES FRONTEND
+# 1. CONFIGURACIÓN DE PÁGINA Y EVITAR ERRORES DE TRADUCCIÓN DEL NAVEGADOR
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Sistema de Facturación - Banco Itaú",
@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Evita que el traductor del navegador rompa la interfaz de Streamlit (removeChild Error)
+# Bloquea la traducción automática del navegador que causa el error "removeChild"
 st.markdown(
     """
     <html lang="es">
@@ -25,7 +25,7 @@ st.markdown(
 )
 
 # -----------------------------------------------------------------------------
-# 2. CONEXIÓN A GOOGLE SHEETS
+# 2. CONEXIÓN Y PERSISTENCIA CON GOOGLE SHEETS
 # -----------------------------------------------------------------------------
 conn = st.connection("gsheets", type=GSheetsConnection)
 SPREADSHEET_NAME = st.secrets["spreadsheet"]["spreadsheet_name"]
@@ -37,7 +37,7 @@ def cargar_datos():
         df_banco = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Banco_Itau")
         df_config = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Configuracion")
 
-        # Formato de facturas
+        # Formato de Facturas
         if df_facturas is not None and not df_facturas.empty:
             df_facturas["Fecha"] = pd.to_datetime(df_facturas["Fecha"]).dt.date
         else:
@@ -45,7 +45,7 @@ def cargar_datos():
                 "ID", "Cliente", "Contador", "Monto_PYG", "Fecha", "Timbrado_Estado", "Estado", "Monto_Pagado"
             ])
 
-        # Formato de movimientos de banco
+        # Formato de Banco Itaú
         if df_banco is not None and not df_banco.empty:
             df_banco["Fecha"] = pd.to_datetime(df_banco["Fecha"]).dt.date
         else:
@@ -53,7 +53,7 @@ def cargar_datos():
                 "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
             ])
 
-        # Formato de configuración / saldo inicial
+        # Formato de Configuración / Saldo Inicial
         if df_config is not None and not df_config.empty:
             config_dict = dict(zip(df_config["Clave"], df_config["Valor"]))
             saldo_inicial = float(config_dict.get("Saldo_Inicial", 0.0))
@@ -63,15 +63,29 @@ def cargar_datos():
         st.session_state.facturas = df_facturas
         st.session_state.banco = df_banco
         st.session_state.saldo_inicial = saldo_inicial
+
     except Exception as e:
-        st.error(f"Error conectando a Google Sheets: {e}")
+        st.error(f"⚠️ Atención: Ocurrió un inconveniente al conectar con Google Sheets: {e}")
+        st.warning("Verifica que la planilla esté compartida como 'Editor' con el correo de tu cuenta de servicio.")
+        
+        # Asignación de variables por defecto para evitar que colapse la interfaz de usuario
+        st.session_state.facturas = pd.DataFrame(columns=[
+            "ID", "Cliente", "Contador", "Monto_PYG", "Fecha", "Timbrado_Estado", "Estado", "Monto_Pagado"
+        ])
+        st.session_state.banco = pd.DataFrame(columns=[
+            "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
+        ])
+        st.session_state.saldo_inicial = 0.0
 
 def guardar_tabla(df, worksheet_name):
-    """Guarda los cambios realizados en Google Sheets."""
-    conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df)
+    """Guarda los cambios de los dataframes en la pestaña correspondiente de Google Sheets."""
+    try:
+        conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df)
+    except Exception as e:
+        st.error(f"Error al guardar los cambios en Google Sheets: {e}")
 
 def formatear_pyg(monto):
-    """Formatea valores numéricos en Guaraníes (₲ 1.500.000)."""
+    """Formatea importes numéricos a Guaraníes (₲ 1.000.000)."""
     return f"₲ {monto:,.0f}".replace(",", ".")
 
 def formatear_fecha(fecha_obj):
@@ -95,7 +109,7 @@ if 'cargado' not in st.session_state:
 FECHA_ACTUAL = date.today()
 
 st.title("🏦 Sistema de Facturación y Control Bancario - Banco Itaú")
-st.caption(f"Sincronizado con Google Sheets | Fecha de hoy: {formatear_fecha(FECHA_ACTUAL)}")
+st.caption(f"Sincronizado con Google Sheets | Fecha actual: {formatear_fecha(FECHA_ACTUAL)}")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
@@ -139,14 +153,14 @@ if menu == "📊 Estado de Cuenta & Dashboard":
 
     col_izq, col_der = st.columns(2)
     with col_izq:
-        st.subheader("📑 Movimientos de Banco Itaú")
+        st.subheader("📑 Extracto / Movimientos de Banco Itaú")
         if not st.session_state.banco.empty:
             df_b = st.session_state.banco.copy()
             df_b["Fecha"] = df_b["Fecha"].apply(formatear_fecha)
             df_b["Monto_PYG"] = df_b["Monto_PYG"].apply(formatear_pyg)
             st.dataframe(df_b[["ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Monto_PYG"]], use_container_width=True)
         else:
-            st.info("Sin movimientos bancarios.")
+            st.info("No hay movimientos bancarios registrados.")
 
     with col_der:
         st.subheader("🧾 Facturas y Timbrados")
@@ -156,7 +170,7 @@ if menu == "📊 Estado de Cuenta & Dashboard":
             df_f["Monto_PYG"] = df_f["Monto_PYG"].apply(formatear_pyg)
             st.dataframe(df_f[["ID", "Cliente", "Contador", "Fecha", "Timbrado_Estado", "Estado", "Monto_PYG"]], use_container_width=True)
         else:
-            st.info("Sin facturas registradas.")
+            st.info("No hay facturas registradas.")
 
 # =============================================================================
 # MÓDULO 2: REGISTRAR FACTURAS
@@ -205,7 +219,7 @@ elif menu == "📋 Registrar Facturas":
                 ], ignore_index=True)
                 
                 guardar_tabla(st.session_state.facturas, "Facturas")
-                st.success(f"✅ Factura #{nuevo_id} guardada en Google Sheets.")
+                st.success(f"✅ Factura #{nuevo_id} guardada con éxito en Google Sheets.")
                 st.rerun()
 
     st.subheader("📋 Lista de Facturas")
@@ -315,7 +329,7 @@ elif menu == "💵 Cobranzas de Facturas":
 
                     guardar_tabla(st.session_state.facturas, "Facturas")
                     guardar_tabla(st.session_state.banco, "Banco_Itau")
-                    st.success(f"✅ Cobro registrado y sumado al Banco Itaú.")
+                    st.success(f"✅ Cobro registrado e impactado en el Banco Itaú.")
                     st.rerun()
     else:
         st.info("No existen facturas registradas.")
