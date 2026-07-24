@@ -189,7 +189,7 @@ if menu == "📊 Estado de Cuenta & Dashboard":
 elif menu == "📋 Registrar Facturas":
     st.header("📋 Registrar Nueva Factura Emitida")
 
-     Opciones de timbrado
+    # Opciones de timbrado
     OPCIONES_TIMBRADO = [
         "🔴 Pendiente de Firma",
         "🟡 Firmado (En proceso)",
