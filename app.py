@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Bloquea la traducción automática del navegador que causa el error "removeChild"
+# Evita que traductores del navegador causen error "removeChild"
 st.markdown(
     """
     <html lang="es">
@@ -30,34 +30,51 @@ st.markdown(
 conn = st.connection("gsheets", type=GSheetsConnection)
 SPREADSHEET_NAME = st.secrets["spreadsheet"]["spreadsheet_name"]
 
+COLUMNAS_FACTURAS = [
+    "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", 
+    "Fecha", "Aplica_Timbrado", "Timbrado_Estado", "Estado", "Monto_Pagado"
+]
+
+COLUMNAS_BANCO = [
+    "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
+]
+
+def normalizar_dataframe(df, columnas_requeridas):
+    """Asegura que el DataFrame tenga exactamente las columnas necesarias."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columnas_requeridas)
+    
+    # Agregar columnas faltantes
+    for col in columnas_requeridas:
+        if col not in df.columns:
+            if col == "Trabajo":
+                df[col] = "N/A"
+            elif col == "Aplica_Timbrado":
+                df[col] = "Sí"
+            elif col in ["Monto_PYG", "Monto_Pagado"]:
+                df[col] = 0.0
+            else:
+                df[col] = ""
+                
+    return df[columnas_requeridas]
+
 def cargar_datos():
-    """Lee la información registrada en las pestañas de Google Sheets."""
+    """Lee y normaliza la información de Google Sheets."""
     try:
         df_facturas = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Facturas")
         df_banco = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Banco_Itau")
         df_config = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Configuracion")
 
-        # Formato de Facturas
-        if df_facturas is not None and not df_facturas.empty:
-            df_facturas["Fecha"] = pd.to_datetime(df_facturas["Fecha"]).dt.date
-            if "Trabajo" not in df_facturas.columns:
-                df_facturas["Trabajo"] = "N/A"
-            if "Aplica_Timbrado" not in df_facturas.columns:
-                df_facturas["Aplica_Timbrado"] = "Sí"
-        else:
-            df_facturas = pd.DataFrame(columns=[
-                "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", "Fecha", "Aplica_Timbrado", "Timbrado_Estado", "Estado", "Monto_Pagado"
-            ])
+        df_facturas = normalizar_dataframe(df_facturas, COLUMNAS_FACTURAS)
+        df_banco = normalizar_dataframe(df_banco, COLUMNAS_BANCO)
 
-        # Formato de Banco Itaú
-        if df_banco is not None and not df_banco.empty:
-            df_banco["Fecha"] = pd.to_datetime(df_banco["Fecha"]).dt.date
-        else:
-            df_banco = pd.DataFrame(columns=[
-                "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
-            ])
+        # Formatear fechas
+        if not df_facturas.empty:
+            df_facturas["Fecha"] = pd.to_datetime(df_facturas["Fecha"], errors='coerce').dt.date
+        if not df_banco.empty:
+            df_banco["Fecha"] = pd.to_datetime(df_banco["Fecha"], errors='coerce').dt.date
 
-        # Formato de Configuración / Saldo Inicial
+        # Saldo Inicial
         if df_config is not None and not df_config.empty:
             config_dict = dict(zip(df_config["Clave"], df_config["Valor"]))
             saldo_inicial = float(config_dict.get("Saldo_Inicial", 0.0))
@@ -69,30 +86,33 @@ def cargar_datos():
         st.session_state.saldo_inicial = saldo_inicial
 
     except Exception as e:
-        st.error(f"⚠️ Atención: Ocurrió un inconveniente al conectar con Google Sheets: {e}")
-        
-        st.session_state.facturas = pd.DataFrame(columns=[
-            "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", "Fecha", "Aplica_Timbrado", "Timbrado_Estado", "Estado", "Monto_Pagado"
-        ])
-        st.session_state.banco = pd.DataFrame(columns=[
-            "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
-        ])
+        st.error(f"⚠️ Error conectando a Google Sheets: {e}")
+        st.session_state.facturas = pd.DataFrame(columns=COLUMNAS_FACTURAS)
+        st.session_state.banco = pd.DataFrame(columns=COLUMNAS_BANCO)
         st.session_state.saldo_inicial = 0.0
 
 def guardar_tabla(df, worksheet_name):
-    """Guarda los cambios de los dataframes en Google Sheets."""
+    """Limpia y guarda un DataFrame en Google Sheets de forma segura."""
     try:
-        conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df)
+        df_a_guardar = df.copy()
+        # Convertir objetos fecha a texto plano antes de enviar
+        if "Fecha" in df_a_guardar.columns:
+            df_a_guardar["Fecha"] = df_a_guardar["Fecha"].astype(str)
+            
+        conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df_a_guardar)
     except Exception as e:
-        st.error(f"Error al guardar los cambios en Google Sheets: {e}")
+        st.error(f"Error al guardar los cambios en Google Sheets ({worksheet_name}): {e}")
 
 def formatear_pyg(monto):
-    """Formatea importes numéricos a Guaraníes (₲ 1.000.000)."""
-    return f"₲ {monto:,.0f}".replace(",", ".")
+    """Formatea valores en Guaraníes (₲ 1.000.000)."""
+    try:
+        return f"₲ {float(monto):,.0f}".replace(",", ".")
+    except (ValueError, TypeError):
+        return "₲ 0"
 
 def formatear_fecha(fecha_obj):
     """Formatea objetos fecha a DD/MM/YYYY."""
-    if pd.isna(fecha_obj) or fecha_obj is None:
+    if pd.isna(fecha_obj) or fecha_obj is None or fecha_obj == "":
         return ""
     if isinstance(fecha_obj, str):
         try:
@@ -136,13 +156,13 @@ if menu == "📊 Estado de Cuenta & Dashboard":
     st.header("📊 Estado de Cuenta Consolidado - Banco Itaú")
 
     saldo_inicial = st.session_state.saldo_inicial
-    ingresos_banco = st.session_state.banco[st.session_state.banco["Monto_PYG"] > 0]["Monto_PYG"].sum() if not st.session_state.banco.empty else 0.0
-    egresos_banco = st.session_state.banco[st.session_state.banco["Monto_PYG"] < 0]["Monto_PYG"].sum() if not st.session_state.banco.empty else 0.0
+    ingresos_banco = pd.to_numeric(st.session_state.banco[st.session_state.banco["Monto_PYG"] > 0]["Monto_PYG"], errors='coerce').sum() if not st.session_state.banco.empty else 0.0
+    egresos_banco = pd.to_numeric(st.session_state.banco[st.session_state.banco["Monto_PYG"] < 0]["Monto_PYG"], errors='coerce').sum() if not st.session_state.banco.empty else 0.0
     
     saldo_actual_banco = saldo_inicial + ingresos_banco + egresos_banco
 
-    total_facturado = st.session_state.facturas["Monto_PYG"].sum() if not st.session_state.facturas.empty else 0.0
-    total_cobrado = st.session_state.facturas["Monto_Pagado"].sum() if not st.session_state.facturas.empty else 0.0
+    total_facturado = pd.to_numeric(st.session_state.facturas["Monto_PYG"], errors='coerce').sum() if not st.session_state.facturas.empty else 0.0
+    total_cobrado = pd.to_numeric(st.session_state.facturas["Monto_Pagado"], errors='coerce').sum() if not st.session_state.facturas.empty else 0.0
     pendiente_cobro = total_facturado - total_cobrado
 
     c1, c2, c3, c4 = st.columns(4)
@@ -190,7 +210,7 @@ elif menu == "📋 Registrar Facturas":
         col1, col2 = st.columns(2)
         with col1:
             cliente = st.text_input("Nombre / Razón Social del Cliente *")
-            trabajo = st.text_input("Trabajo / Descripción de Trabajo Correspondiente *", placeholder="Ej: Impresión de Folletos, Servicios Contables")
+            trabajo = st.text_input("Trabajo / Descripción Correspondiente *", placeholder="Ej: Impresión de Folletos")
             contador = st.text_input("Contador Asociado *")
             monto = st.number_input("Monto Total (en Guaraníes ₲) *", min_value=0.0, step=100000.0, value=1000000.0)
         
@@ -229,7 +249,7 @@ elif menu == "📋 Registrar Facturas":
                 ], ignore_index=True)
                 
                 guardar_tabla(st.session_state.facturas, "Facturas")
-                st.success(f"✅ Factura #{nuevo_id} para el trabajo '{trabajo}' guardada con éxito.")
+                st.success(f"✅ Factura #{nuevo_id} guardada con éxito en Google Sheets.")
                 st.rerun()
 
     st.subheader("📋 Lista de Facturas")
@@ -246,7 +266,6 @@ elif menu == "🏷️ Gestionar Timbrados":
     st.header("🏷️ Control de Timbrados: Firmados y Devueltos a Imprenta")
 
     if not st.session_state.facturas.empty:
-        # Filtrar solo las facturas que sí requieren timbrado
         facturas_con_timbrado = st.session_state.facturas[st.session_state.facturas["Aplica_Timbrado"] != "No"]
 
         if facturas_con_timbrado.empty:
@@ -300,7 +319,7 @@ elif menu == "💵 Cobranzas de Facturas":
         else:
             opciones_dict = {}
             for _, row in facturas_pendientes.iterrows():
-                pend = row['Monto_PYG'] - row['Monto_Pagado']
+                pend = float(row['Monto_PYG']) - float(row['Monto_Pagado'])
                 key_text = f"Factura #{row['ID']} - {row['Cliente']} [{row['Trabajo']}] (Pendiente: {formatear_pyg(pend)})"
                 opciones_dict[key_text] = int(row['ID'])
             
@@ -308,7 +327,7 @@ elif menu == "💵 Cobranzas de Facturas":
             factura_id_sel = opciones_dict[seleccion]
             
             factura_actual = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].iloc[0]
-            monto_pendiente = factura_actual["Monto_PYG"] - factura_actual["Monto_Pagado"]
+            monto_pendiente = float(factura_actual["Monto_PYG"]) - float(factura_actual["Monto_Pagado"])
 
             with st.form("form_cobro"):
                 c1, c2 = st.columns(2)
@@ -326,10 +345,10 @@ elif menu == "💵 Cobranzas de Facturas":
 
                 if st.form_submit_button("💳 Registrar Pago en Banco Itaú"):
                     idx = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].index[0]
-                    nuevo_pagado = st.session_state.facturas.at[idx, "Monto_Pagado"] + monto_a_cobrar
+                    nuevo_pagado = float(st.session_state.facturas.at[idx, "Monto_Pagado"]) + monto_a_cobrar
                     st.session_state.facturas.at[idx, "Monto_Pagado"] = nuevo_pagado
                     
-                    if nuevo_pagado >= st.session_state.facturas.at[idx, "Monto_PYG"]:
+                    if nuevo_pagado >= float(st.session_state.facturas.at[idx, "Monto_PYG"]):
                         st.session_state.facturas.at[idx, "Estado"] = "Pagado Total"
                     else:
                         st.session_state.facturas.at[idx, "Estado"] = "Pagado Parcial"
