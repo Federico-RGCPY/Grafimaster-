@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURACIÓN DE PÁGINA Y EVITAR ERRORES DE TRADUCCIÓN DEL NAVEGADOR
@@ -25,10 +26,29 @@ st.markdown(
 )
 
 # -----------------------------------------------------------------------------
-# 2. CONEXIÓN Y PERSISTENCIA CON GOOGLE SHEETS
+# 2. CONEXIÓN DIRECTA NATIVA A GOOGLE SHEETS (GSPREAD)
 # -----------------------------------------------------------------------------
-conn = st.connection("gsheets", type=GSheetsConnection)
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+@st.cache_resource
+def obtener_cliente_gspread():
+    """Autentica con la cuenta de servicio registrada en Secrets."""
+    creds_dict = st.secrets["gcp_service_account"]
+    credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(credentials)
+
 SPREADSHEET_NAME = st.secrets["spreadsheet"]["spreadsheet_name"]
+
+def obtener_hoja():
+    """Abre el documento de Google Sheets por Nombre o por URL/ID."""
+    gc = obtener_cliente_gspread()
+    if SPREADSHEET_NAME.startswith("http"):
+        return gc.open_by_url(SPREADSHEET_NAME)
+    else:
+        return gc.open(SPREADSHEET_NAME)
 
 COLUMNAS_FACTURAS = [
     "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", 
@@ -39,50 +59,56 @@ COLUMNAS_BANCO = [
     "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
 ]
 
-def normalizar_dataframe(df, columnas_requeridas):
-    """Asegura que el DataFrame tenga exactamente las columnas necesarias."""
-    if df is None or df.empty:
+def normalizar_df(records, columnas_requeridas):
+    """Convierte los registros de gspread en DataFrame seguro."""
+    if not records:
         return pd.DataFrame(columns=columnas_requeridas)
-    
-    # Agregar columnas faltantes
+    df = pd.DataFrame(records)
     for col in columnas_requeridas:
         if col not in df.columns:
-            if col == "Trabajo":
-                df[col] = "N/A"
-            elif col == "Aplica_Timbrado":
-                df[col] = "Sí"
-            elif col in ["Monto_PYG", "Monto_Pagado"]:
-                df[col] = 0.0
-            else:
-                df[col] = ""
-                
+            df[col] = ""
     return df[columnas_requeridas]
 
 def cargar_datos():
-    """Lee y normaliza la información de Google Sheets."""
+    """Lee todas las pestañas de Google Sheets directamente con gspread."""
     try:
-        df_facturas = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Facturas")
-        df_banco = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Banco_Itau")
-        df_config = conn.read(spreadsheet=SPREADSHEET_NAME, worksheet="Configuracion")
+        sh = obtener_hoja()
+        
+        # Pestaña Facturas
+        ws_f = sh.worksheet("Facturas")
+        rec_f = ws_f.get_all_records()
+        df_f = normalizar_df(rec_f, COLUMNAS_FACTURAS)
 
-        df_facturas = normalizar_dataframe(df_facturas, COLUMNAS_FACTURAS)
-        df_banco = normalizar_dataframe(df_banco, COLUMNAS_BANCO)
+        # Pestaña Banco_Itau
+        ws_b = sh.worksheet("Banco_Itau")
+        rec_b = ws_b.get_all_records()
+        df_b = normalizar_df(rec_b, COLUMNAS_BANCO)
 
-        # Formatear fechas
-        if not df_facturas.empty:
-            df_facturas["Fecha"] = pd.to_datetime(df_facturas["Fecha"], errors='coerce').dt.date
-        if not df_banco.empty:
-            df_banco["Fecha"] = pd.to_datetime(df_banco["Fecha"], errors='coerce').dt.date
+        # Pestaña Configuracion
+        ws_c = sh.worksheet("Configuracion")
+        rec_c = ws_c.get_all_records()
+        df_c = pd.DataFrame(rec_c)
+        
+        saldo_inicial = 0.0
+        if not df_c.empty and "Clave" in df_c.columns and "Valor" in df_c.columns:
+            config_dict = dict(zip(df_c["Clave"], df_c["Valor"]))
+            try:
+                saldo_inicial = float(config_dict.get("Saldo_Inicial", 0.0))
+            except ValueError:
+                saldo_inicial = 0.0
 
-        # Saldo Inicial
-        if df_config is not None and not df_config.empty:
-            config_dict = dict(zip(df_config["Clave"], df_config["Valor"]))
-            saldo_inicial = float(config_dict.get("Saldo_Inicial", 0.0))
-        else:
-            saldo_inicial = 0.0
+        # Parsear tipos de datos numéricos y fechas
+        if not df_f.empty:
+            df_f["Monto_PYG"] = pd.to_numeric(df_f["Monto_PYG"], errors='coerce').fillna(0.0)
+            df_f["Monto_Pagado"] = pd.to_numeric(df_f["Monto_Pagado"], errors='coerce').fillna(0.0)
+            df_f["Fecha"] = pd.to_datetime(df_f["Fecha"], errors='coerce').dt.date
 
-        st.session_state.facturas = df_facturas
-        st.session_state.banco = df_banco
+        if not df_b.empty:
+            df_b["Monto_PYG"] = pd.to_numeric(df_b["Monto_PYG"], errors='coerce').fillna(0.0)
+            df_b["Fecha"] = pd.to_datetime(df_b["Fecha"], errors='coerce').dt.date
+
+        st.session_state.facturas = df_f
+        st.session_state.banco = df_b
         st.session_state.saldo_inicial = saldo_inicial
 
     except Exception as e:
@@ -92,16 +118,24 @@ def cargar_datos():
         st.session_state.saldo_inicial = 0.0
 
 def guardar_tabla(df, worksheet_name):
-    """Limpia y guarda un DataFrame en Google Sheets de forma segura."""
+    """Escribe los datos directamente en Google Sheets limpiando la hoja."""
     try:
-        df_a_guardar = df.copy()
-        # Convertir objetos fecha a texto plano antes de enviar
-        if "Fecha" in df_a_guardar.columns:
-            df_a_guardar["Fecha"] = df_a_guardar["Fecha"].astype(str)
+        sh = obtener_hoja()
+        ws = sh.worksheet(worksheet_name)
+        
+        df_save = df.copy()
+        if "Fecha" in df_save.columns:
+            df_save["Fecha"] = df_save["Fecha"].astype(str)
             
-        conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df_a_guardar)
+        # Reemplazar valores nulos/NaN por texto vacío
+        df_save = df_save.fillna("")
+        
+        # Limpiar la hoja y subir encabezados + datos
+        ws.clear()
+        datos_completos = [df_save.columns.values.tolist()] + df_save.values.tolist()
+        ws.update(datos_completos)
     except Exception as e:
-        st.error(f"Error al guardar los cambios en Google Sheets ({worksheet_name}): {e}")
+        st.error(f"Error al guardar los datos en {worksheet_name}: {e}")
 
 def formatear_pyg(monto):
     """Formatea valores en Guaraníes (₲ 1.000.000)."""
@@ -131,7 +165,7 @@ if 'cargado' not in st.session_state:
 FECHA_ACTUAL = date.today()
 
 st.title("🏦 Sistema de Facturación y Control Bancario - Banco Itaú")
-st.caption(f"Sincronizado con Google Sheets | Fecha actual: {formatear_fecha(FECHA_ACTUAL)}")
+st.caption(f"Conexión Directa GSpread | Fecha actual: {formatear_fecha(FECHA_ACTUAL)}")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
@@ -249,7 +283,7 @@ elif menu == "📋 Registrar Facturas":
                 ], ignore_index=True)
                 
                 guardar_tabla(st.session_state.facturas, "Facturas")
-                st.success(f"✅ Factura #{nuevo_id} guardada con éxito en Google Sheets.")
+                st.success(f"✅ Factura #{nuevo_id} guardada con éxito.")
                 st.rerun()
 
     st.subheader("📋 Lista de Facturas")
