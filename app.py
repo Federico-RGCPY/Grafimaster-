@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -35,27 +36,20 @@ scopes = [
 
 @st.cache_resource
 def obtener_cliente_gspread():
-    """Autentica sanitizando la clave privada contra errores de formato TOML/PEM."""
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    
-    if "private_key" in creds_dict:
-        pk = str(creds_dict["private_key"])
-        
-        # 1. Remover comillas de inicio y fin si quedaron atrapadas
-        pk = pk.strip("'\"")
-        
-        # 2. Corregir secuencias de escape corruptas (\n, \t, etc.)
-        pk = pk.replace("\\n", "\n").replace("\t", "").replace("\\t", "")
-        
-        # 3. Asegurar saltos de línea limpios alrededor de los encabezados PEM
-        if "-----BEGIN PRIVATE KEY-----" in pk and "-----END PRIVATE KEY-----" in pk:
-            cuerpo = pk.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "").strip()
-            # Limpiar espacios en blanco dentro del bloque base64
-            lineas_base64 = [linea.strip() for linea in cuerpo.split("\n") if linea.strip()]
-            cuerpo_limpio = "\n".join(lineas_base64)
-            pk = f"-----BEGIN PRIVATE KEY-----\n{cuerpo_limpio}\n-----END PRIVATE KEY-----\n"
-            
-        creds_dict["private_key"] = pk
+    """Autentica cargando credenciales directamente en JSON o diccionario sin errores de PEM."""
+    # Opción 1: Carga directa desde string JSON completo en Secrets (Recomendado para evitar errores PEM)
+    if "gcp_json" in st.secrets:
+        json_str = st.secrets["gcp_json"]
+        creds_dict = json.loads(json_str, strict=False)
+    # Opción 2: Fallback desde la sección de diccionario TOML [gcp_service_account]
+    elif "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        if "private_key" in creds_dict:
+            pk = str(creds_dict["private_key"]).strip("'\"")
+            pk = pk.replace("\\n", "\n").replace("\t", "").replace("\\t", "")
+            creds_dict["private_key"] = pk
+    else:
+        raise ValueError("No se encontraron las credenciales de Google Cloud en los Secrets.")
 
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(credentials)
