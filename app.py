@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import json
+import io
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -166,6 +167,10 @@ def formatear_fecha(fecha_obj):
             return fecha_obj
     return fecha_obj.strftime("%d/%m/%Y")
 
+def convertir_df_a_csv(df):
+    """Convierte un dataframe a CSV descargable en UTF-8."""
+    return df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
+
 # -----------------------------------------------------------------------------
 # 3. INICIALIZACIÓN
 # -----------------------------------------------------------------------------
@@ -186,6 +191,7 @@ menu = st.sidebar.radio(
     "📍 Menú Principal",
     [
         "📊 Estado de Cuenta & Dashboard",
+        "👨‍💼 Reporte por Contador",
         "📋 Registrar y Anular Facturas",
         "🏷️ Gestionar Timbrados",
         "💵 Cobranzas de Facturas",
@@ -206,7 +212,6 @@ if menu == "📊 Estado de Cuenta & Dashboard":
     
     saldo_actual_banco = saldo_inicial + ingresos_banco + egresos_banco
 
-    # Filtrar solo facturas válidas (no anuladas) para métricas
     facturas_validas = st.session_state.facturas[st.session_state.facturas["Estado"] != "Anulada"] if not st.session_state.facturas.empty else pd.DataFrame()
 
     total_facturado = pd.to_numeric(facturas_validas["Monto_PYG"], errors='coerce').sum() if not facturas_validas.empty else 0.0
@@ -243,6 +248,70 @@ if menu == "📊 Estado de Cuenta & Dashboard":
             st.info("No hay facturas registradas.")
 
 # =============================================================================
+# MÓDULO NUEVO: REPORTE & ESTADO DE CUENTA POR CONTADOR
+# =============================================================================
+elif menu == "👨‍💼 Reporte por Contador":
+    st.header("👨‍💼 Estado de Cuenta Filtrado por Contador")
+
+    if not st.session_state.facturas.empty:
+        # Obtener lista de contadores únicos sin vacíos y sin facturas anuladas
+        df_validas = st.session_state.facturas[st.session_state.facturas["Estado"] != "Anulada"].copy()
+        
+        lista_contadores = sorted([str(c).strip() for c in df_validas["Contador"].unique() if str(c).strip() != ""])
+
+        if not lista_contadores:
+            st.info("No hay facturas activas asociadas a ningún contador.")
+        else:
+            contador_seleccionado = st.selectbox("🔍 Seleccione el Contador:", ["-- Todos los Contadores --"] + lista_contadores)
+
+            if contador_seleccionado != "-- Todos los Contadores --":
+                df_filtrado = df_validas[df_validas["Contador"] == contador_seleccionado].copy()
+            else:
+                df_filtrado = df_validas.copy()
+
+            # Métricas del Contador
+            tot_fact = df_filtrado["Monto_PYG"].sum()
+            tot_cob = df_filtrado["Monto_Pagado"].sum()
+            tot_pend = tot_fact - tot_cob
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Facturado", formatear_pyg(tot_fact))
+            m2.metric("Total Cobrado", formatear_pyg(tot_cob))
+            m3.metric("Saldo Pendiente", formatear_pyg(tot_pend))
+
+            st.markdown("---")
+
+            # Preparar tabla para visualización y exportación
+            df_export = df_filtrado.copy()
+            df_export["Saldo_Pendiente"] = df_export["Monto_PYG"] - df_export["Monto_Pagado"]
+
+            # Generar archivo CSV/Excel para descargar
+            csv_data = convertir_df_a_csv(df_export)
+            
+            st.download_button(
+                label=f"📥 Descargar Estado de Cuenta ({contador_seleccionado})",
+                data=csv_data,
+                file_name=f"Estado_de_Cuenta_{contador_seleccionado.replace(' ', '_')}_{FECHA_ACTUAL}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+            st.subheader(f"📋 Detalle de Facturas - {contador_seleccionado}")
+            
+            df_vis = df_export.copy()
+            df_vis["Fecha"] = df_vis["Fecha"].apply(formatear_fecha)
+            df_vis["Monto_PYG"] = df_vis["Monto_PYG"].apply(formatear_pyg)
+            df_vis["Monto_Pagado"] = df_vis["Monto_Pagado"].apply(formatear_pyg)
+            df_vis["Saldo_Pendiente"] = df_vis["Saldo_Pendiente"].apply(formatear_pyg)
+
+            st.dataframe(
+                df_vis[["ID", "Cliente", "Trabajo", "Contador", "Fecha", "Timbrado_Estado", "Estado", "Monto_PYG", "Monto_Pagado", "Saldo_Pendiente"]],
+                use_container_width=True
+            )
+    else:
+        st.info("No hay facturas registradas en la base de datos.")
+
+# =============================================================================
 # MÓDULO 2: REGISTRAR Y ANULAR FACTURAS
 # =============================================================================
 elif menu == "📋 Registrar y Anular Facturas":
@@ -250,9 +319,6 @@ elif menu == "📋 Registrar y Anular Facturas":
 
     tab_registro, tab_anulacion = st.tabs(["📝 Emitir Nueva Factura", "🚫 Anular Factura Creada"])
 
-    # -------------------------------------------------------------------------
-    # TAB 1: EMITIR FACTURA
-    # -------------------------------------------------------------------------
     with tab_registro:
         OPCIONES_TIMBRADO = [
             "🔴 Pendiente de Firma",
@@ -313,15 +379,11 @@ elif menu == "📋 Registrar y Anular Facturas":
             df_disp["Monto_PYG"] = df_disp["Monto_PYG"].apply(formatear_pyg)
             st.dataframe(df_disp, use_container_width=True)
 
-    # -------------------------------------------------------------------------
-    # TAB 2: ANULAR FACTURA CREADA
-    # -------------------------------------------------------------------------
     with tab_anulacion:
         st.subheader("🚫 Anular Factura Emitida")
         st.caption("Selecciona una factura registrada por error. Su estado pasará a 'Anulada' y sus valores no afectarán los totales.")
 
         if not st.session_state.facturas.empty:
-            # Facturas no anuladas aún
             facturas_activas = st.session_state.facturas[st.session_state.facturas["Estado"] != "Anulada"]
 
             if facturas_activas.empty:
@@ -329,7 +391,7 @@ elif menu == "📋 Registrar y Anular Facturas":
             else:
                 dict_fact_anular = {}
                 for _, r in facturas_activas.iterrows():
-                    lbl = f"Factura #{r['ID']} - {r['Cliente']} [{r['Trabajo']}] - Monto: {formatear_pyg(r['Monto_PYG'])} ({r['Estado']})"
+                    lbl = f"Factura #{r['ID']} - {r['Cliente']} [{r['Trabajo']}] - Contador: {r['Contador']} - Monto: {formatear_pyg(r['Monto_PYG'])}"
                     dict_fact_anular[lbl] = int(r['ID'])
 
                 sel_label = st.selectbox("Seleccione la Factura a Anular:", list(dict_fact_anular.keys()))
@@ -337,16 +399,14 @@ elif menu == "📋 Registrar y Anular Facturas":
 
                 factura_obj = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_anular].iloc[0]
 
-                st.warning(f"⚠️ **Atención:** Se anulará la Factura #{id_fact_anular} de **{factura_obj['Cliente']}** por {formatear_pyg(factura_obj['Monto_PYG'])}. Si poseía un cobro registrado en el Banco Itaú, también será revertido.")
+                st.warning(f"⚠️ **Atención:** Se anulará la Factura #{id_fact_anular} de **{factura_obj['Cliente']}** por {formatear_pyg(factura_obj['Monto_PYG'])}.")
 
                 if st.button("🔴 Confirmar Anulación de la Factura"):
                     idx_f = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_anular].index[0]
                     
-                    # 1. Marcar como Anulada y resetear montos cobrados
                     st.session_state.facturas.at[idx_f, "Estado"] = "Anulada"
                     st.session_state.facturas.at[idx_f, "Monto_Pagado"] = 0.0
 
-                    # 2. Si tenía cobros en Banco Itaú, eliminarlos del extracto bancario
                     if not st.session_state.banco.empty:
                         st.session_state.banco = st.session_state.banco[st.session_state.banco["Factura_ID"] != id_fact_anular]
                         guardar_tabla(st.session_state.banco, "Banco_Itau")
@@ -413,7 +473,6 @@ elif menu == "💵 Cobranzas de Facturas":
     st.header("💵 Registrar Cobranza (Efectivo o Banco Itaú)")
 
     if not st.session_state.facturas.empty:
-        # Filtrar facturas no pagadas y que no estén anuladas
         facturas_pendientes = st.session_state.facturas[
             (st.session_state.facturas["Estado"] != "Pagado Total") & 
             (st.session_state.facturas["Estado"] != "Anulada")
@@ -425,7 +484,7 @@ elif menu == "💵 Cobranzas de Facturas":
             opciones_dict = {}
             for _, row in facturas_pendientes.iterrows():
                 pend = float(row['Monto_PYG']) - float(row['Monto_Pagado'])
-                key_text = f"Factura #{row['ID']} - {row['Cliente']} [{row['Trabajo']}] (Pendiente: {formatear_pyg(pend)})"
+                key_text = f"Factura #{row['ID']} - {row['Cliente']} [{row['Trabajo']}] - Contador: {row['Contador']} (Pendiente: {formatear_pyg(pend)})"
                 opciones_dict[key_text] = int(row['ID'])
             
             seleccion = st.selectbox("Seleccione Factura a Cobrar:", list(opciones_dict.keys()))
@@ -459,7 +518,6 @@ elif menu == "💵 Cobranzas de Facturas":
                     else:
                         st.session_state.facturas.at[idx, "Estado"] = "Pagado Parcial"
 
-                    # Si el pago es por Banco Itaú, impacta el banco
                     if "Banco Itaú" in metodo_pago:
                         nuevo_id_banco = len(st.session_state.banco) + 1
                         nuevo_mov_banco = {
