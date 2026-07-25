@@ -5,7 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y EVITAR ERRORES DE TRADUCCIÓN DEL NAVEGADOR
+# 1. CONFIGURACIÓN DE PÁGINA Y PREVENCIÓN DE ERRORES DE TRADUCCIÓN DEL NAVEGADOR
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Sistema de Facturación - Banco Itaú",
@@ -35,16 +35,26 @@ scopes = [
 
 @st.cache_resource
 def obtener_cliente_gspread():
-    """Autentica con la cuenta de servicio procesando correctamente la clave privada."""
+    """Autentica sanitizando la clave privada contra errores de formato TOML/PEM."""
     creds_dict = dict(st.secrets["gcp_service_account"])
     
     if "private_key" in creds_dict:
         pk = str(creds_dict["private_key"])
-        # Reemplazar la secuencia literal '\\n' por saltos de línea reales '\n'
-        pk = pk.replace("\\n", "\n")
-        # Remover comillas de inicio/fin si las conserva el formato TOML
-        if (pk.startswith('"') and pk.endswith('"')) or (pk.startswith("'") and pk.endswith("'")):
-            pk = pk[1:-1]
+        
+        # 1. Remover comillas de inicio y fin si quedaron atrapadas
+        pk = pk.strip("'\"")
+        
+        # 2. Corregir secuencias de escape corruptas (\n, \t, etc.)
+        pk = pk.replace("\\n", "\n").replace("\t", "").replace("\\t", "")
+        
+        # 3. Asegurar saltos de línea limpios alrededor de los encabezados PEM
+        if "-----BEGIN PRIVATE KEY-----" in pk and "-----END PRIVATE KEY-----" in pk:
+            cuerpo = pk.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "").strip()
+            # Limpiar espacios en blanco dentro del bloque base64
+            lineas_base64 = [linea.strip() for linea in cuerpo.split("\n") if linea.strip()]
+            cuerpo_limpio = "\n".join(lineas_base64)
+            pk = f"-----BEGIN PRIVATE KEY-----\n{cuerpo_limpio}\n-----END PRIVATE KEY-----\n"
+            
         creds_dict["private_key"] = pk
 
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
