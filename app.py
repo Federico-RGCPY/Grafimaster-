@@ -5,7 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y EVITAR ERRORES DE TRADUCCIÓN DEL NAVEGADOR
+# 1. CONFIGURACIÓN DE PÁGINA Y PREVENCIÓN DE ERRORES DE TRADUCCIÓN DEL NAVEGADOR
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Sistema de Facturación - Banco Itaú",
@@ -35,16 +35,29 @@ scopes = [
 
 @st.cache_resource
 def obtener_cliente_gspread():
-    """Autentica con la cuenta de servicio corrigiendo automáticamente la clave PEM."""
-    # Copiamos la configuración de secrets
+    """Autentica con la cuenta de servicio saneando la clave privada PEM."""
     creds_dict = dict(st.secrets["gcp_service_account"])
     
-    # Reparar automáticamente la clave privada para evitar el error PEM InvalidByte
-    p_key = creds_dict["private_key"]
-    p_key = p_key.replace("\\n", "\n")
-    p_key = p_key.strip("'\"")
-    creds_dict["private_key"] = p_key
+    p_key = str(creds_dict["private_key"])
     
+    # 1. Quitar comillas externas si existen
+    p_key = p_key.strip("'\"")
+    
+    # 2. Reemplazar '\\n' literales por saltos de línea reales '\n'
+    p_key = p_key.replace("\\n", "\n")
+    
+    # 3. Limpiar y reconstruir bloque PEM correctamente
+    if "-----BEGIN PRIVATE KEY-----" in p_key and "-----END PRIVATE KEY-----" in p_key:
+        partes = p_key.split("-----BEGIN PRIVATE KEY-----")
+        cuerpo_y_fin = partes[1].split("-----END PRIVATE KEY-----")
+        cuerpo = cuerpo_y_fin[0].replace(" ", "\n").strip()
+        cuerpo_lineas = [linea.strip() for linea in cuerpo.split("\n") if linea.strip()]
+        cuerpo_limpio = "\n".join(cuerpo_lineas)
+        
+        p_key = f"-----BEGIN PRIVATE KEY-----\n{cuerpo_limpio}\n-----END PRIVATE KEY-----\n"
+
+    creds_dict["private_key"] = p_key
+
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(credentials)
 
