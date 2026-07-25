@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Evita que traductores del navegador causen error "removeChild"
+# Evita que traductores automáticos del navegador rompan la interfaz de Streamlit (error removeChild)
 st.markdown(
     """
     <html lang="es">
@@ -35,8 +35,16 @@ scopes = [
 
 @st.cache_resource
 def obtener_cliente_gspread():
-    """Autentica con la cuenta de servicio registrada en Secrets."""
-    creds_dict = st.secrets["gcp_service_account"]
+    """Autentica con la cuenta de servicio corrigiendo automáticamente la clave PEM."""
+    # Copiamos la configuración de secrets
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    
+    # Reparar automáticamente la clave privada para evitar el error PEM InvalidByte
+    p_key = creds_dict["private_key"]
+    p_key = p_key.replace("\\n", "\n")
+    p_key = p_key.strip("'\"")
+    creds_dict["private_key"] = p_key
+    
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(credentials)
 
@@ -60,7 +68,7 @@ COLUMNAS_BANCO = [
 ]
 
 def normalizar_df(records, columnas_requeridas):
-    """Convierte los registros de gspread en DataFrame seguro."""
+    """Convierte los registros de gspread en DataFrame seguro con todas sus columnas."""
     if not records:
         return pd.DataFrame(columns=columnas_requeridas)
     df = pd.DataFrame(records)
@@ -118,7 +126,7 @@ def cargar_datos():
         st.session_state.saldo_inicial = 0.0
 
 def guardar_tabla(df, worksheet_name):
-    """Escribe los datos directamente en Google Sheets limpiando la hoja."""
+    """Escribe los datos en Google Sheets limpiando y subiendo la tabla."""
     try:
         sh = obtener_hoja()
         ws = sh.worksheet(worksheet_name)
@@ -127,10 +135,8 @@ def guardar_tabla(df, worksheet_name):
         if "Fecha" in df_save.columns:
             df_save["Fecha"] = df_save["Fecha"].astype(str)
             
-        # Reemplazar valores nulos/NaN por texto vacío
         df_save = df_save.fillna("")
         
-        # Limpiar la hoja y subir encabezados + datos
         ws.clear()
         datos_completos = [df_save.columns.values.tolist()] + df_save.values.tolist()
         ws.update(datos_completos)
@@ -138,7 +144,7 @@ def guardar_tabla(df, worksheet_name):
         st.error(f"Error al guardar los datos en {worksheet_name}: {e}")
 
 def formatear_pyg(monto):
-    """Formatea valores en Guaraníes (₲ 1.000.000)."""
+    """Formatea valores numéricos a Guaraníes (₲ 1.000.000)."""
     try:
         return f"₲ {float(monto):,.0f}".replace(",", ".")
     except (ValueError, TypeError):
