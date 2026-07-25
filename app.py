@@ -40,9 +40,13 @@ def cargar_datos():
         # Formato de Facturas
         if df_facturas is not None and not df_facturas.empty:
             df_facturas["Fecha"] = pd.to_datetime(df_facturas["Fecha"]).dt.date
+            if "Trabajo" not in df_facturas.columns:
+                df_facturas["Trabajo"] = "N/A"
+            if "Aplica_Timbrado" not in df_facturas.columns:
+                df_facturas["Aplica_Timbrado"] = "Sí"
         else:
             df_facturas = pd.DataFrame(columns=[
-                "ID", "Cliente", "Contador", "Monto_PYG", "Fecha", "Timbrado_Estado", "Estado", "Monto_Pagado"
+                "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", "Fecha", "Aplica_Timbrado", "Timbrado_Estado", "Estado", "Monto_Pagado"
             ])
 
         # Formato de Banco Itaú
@@ -66,11 +70,9 @@ def cargar_datos():
 
     except Exception as e:
         st.error(f"⚠️ Atención: Ocurrió un inconveniente al conectar con Google Sheets: {e}")
-        st.warning("Verifica que la planilla esté compartida como 'Editor' con el correo de tu cuenta de servicio.")
         
-        # Asignación de variables por defecto para evitar que colapse la interfaz de usuario
         st.session_state.facturas = pd.DataFrame(columns=[
-            "ID", "Cliente", "Contador", "Monto_PYG", "Fecha", "Timbrado_Estado", "Estado", "Monto_Pagado"
+            "ID", "Cliente", "Contador", "Trabajo", "Monto_PYG", "Fecha", "Aplica_Timbrado", "Timbrado_Estado", "Estado", "Monto_Pagado"
         ])
         st.session_state.banco = pd.DataFrame(columns=[
             "ID", "Fecha", "Tipo", "Concepto", "Cliente_Asociado", "Factura_ID", "Monto_PYG"
@@ -78,7 +80,7 @@ def cargar_datos():
         st.session_state.saldo_inicial = 0.0
 
 def guardar_tabla(df, worksheet_name):
-    """Guarda los cambios de los dataframes en la pestaña correspondiente de Google Sheets."""
+    """Guarda los cambios de los dataframes en Google Sheets."""
     try:
         conn.update(spreadsheet=SPREADSHEET_NAME, worksheet=worksheet_name, data=df)
     except Exception as e:
@@ -89,7 +91,7 @@ def formatear_pyg(monto):
     return f"₲ {monto:,.0f}".replace(",", ".")
 
 def formatear_fecha(fecha_obj):
-    """Formatea objetos fecha a DD/MM/YYYY (ej: 24/07/2026)."""
+    """Formatea objetos fecha a DD/MM/YYYY."""
     if pd.isna(fecha_obj) or fecha_obj is None:
         return ""
     if isinstance(fecha_obj, str):
@@ -163,12 +165,12 @@ if menu == "📊 Estado de Cuenta & Dashboard":
             st.info("No hay movimientos bancarios registrados.")
 
     with col_der:
-        st.subheader("🧾 Facturas y Timbrados")
+        st.subheader("🧾 Facturas y Trabajos")
         if not st.session_state.facturas.empty:
             df_f = st.session_state.facturas.copy()
             df_f["Fecha"] = df_f["Fecha"].apply(formatear_fecha)
             df_f["Monto_PYG"] = df_f["Monto_PYG"].apply(formatear_pyg)
-            st.dataframe(df_f[["ID", "Cliente", "Contador", "Fecha", "Timbrado_Estado", "Estado", "Monto_PYG"]], use_container_width=True)
+            st.dataframe(df_f[["ID", "Cliente", "Trabajo", "Contador", "Fecha", "Timbrado_Estado", "Estado", "Monto_PYG"]], use_container_width=True)
         else:
             st.info("No hay facturas registradas.")
 
@@ -188,17 +190,23 @@ elif menu == "📋 Registrar Facturas":
         col1, col2 = st.columns(2)
         with col1:
             cliente = st.text_input("Nombre / Razón Social del Cliente *")
+            trabajo = st.text_input("Trabajo / Descripción de Trabajo Correspondiente *", placeholder="Ej: Impresión de Folletos, Servicios Contables")
             contador = st.text_input("Contador Asociado *")
             monto = st.number_input("Monto Total (en Guaraníes ₲) *", min_value=0.0, step=100000.0, value=1000000.0)
         
         with col2:
             fecha_emision = st.date_input("Fecha de Emisión", value=FECHA_ACTUAL, format="DD/MM/YYYY")
-            timbrado_estado = st.selectbox("Estado del Timbrado:", OPCIONES_TIMBRADO)
+            aplica_timbrado = st.checkbox("¿Aplica / Requiere Timbrado?", value=True)
+            
+            if aplica_timbrado:
+                timbrado_estado = st.selectbox("Estado del Timbrado:", OPCIONES_TIMBRADO)
+            else:
+                timbrado_estado = "⚪ No Aplica"
             
         submitted = st.form_submit_button("💾 Guardar Factura en Google Sheets")
 
         if submitted:
-            if not cliente or not contador:
+            if not cliente or not contador or not trabajo:
                 st.error("Por favor completa los campos obligatorios (*).")
             else:
                 nuevo_id = len(st.session_state.facturas) + 1
@@ -206,8 +214,10 @@ elif menu == "📋 Registrar Facturas":
                     "ID": nuevo_id,
                     "Cliente": cliente.strip(),
                     "Contador": contador.strip(),
+                    "Trabajo": trabajo.strip(),
                     "Monto_PYG": float(monto),
                     "Fecha": str(fecha_emision),
+                    "Aplica_Timbrado": "Sí" if aplica_timbrado else "No",
                     "Timbrado_Estado": timbrado_estado,
                     "Estado": "Pendiente",
                     "Monto_Pagado": 0.0
@@ -219,7 +229,7 @@ elif menu == "📋 Registrar Facturas":
                 ], ignore_index=True)
                 
                 guardar_tabla(st.session_state.facturas, "Facturas")
-                st.success(f"✅ Factura #{nuevo_id} guardada con éxito en Google Sheets.")
+                st.success(f"✅ Factura #{nuevo_id} para el trabajo '{trabajo}' guardada con éxito.")
                 st.rerun()
 
     st.subheader("📋 Lista de Facturas")
@@ -236,35 +246,43 @@ elif menu == "🏷️ Gestionar Timbrados":
     st.header("🏷️ Control de Timbrados: Firmados y Devueltos a Imprenta")
 
     if not st.session_state.facturas.empty:
-        df_show = st.session_state.facturas.copy()
-        df_show["Fecha"] = df_show["Fecha"].apply(formatear_fecha)
-        df_show["Monto_PYG"] = df_show["Monto_PYG"].apply(formatear_pyg)
-        st.dataframe(df_show[["ID", "Cliente", "Contador", "Fecha", "Timbrado_Estado", "Monto_PYG"]], use_container_width=True)
+        # Filtrar solo las facturas que sí requieren timbrado
+        facturas_con_timbrado = st.session_state.facturas[st.session_state.facturas["Aplica_Timbrado"] != "No"]
 
-        st.markdown("---")
-        st.subheader("✏️ Actualizar Estado de Timbrado")
+        if facturas_con_timbrado.empty:
+            st.info("No hay facturas registradas que requieran timbrado.")
+        else:
+            df_show = facturas_con_timbrado.copy()
+            df_show["Fecha"] = df_show["Fecha"].apply(formatear_fecha)
+            df_show["Monto_PYG"] = df_show["Monto_PYG"].apply(formatear_pyg)
+            st.dataframe(df_show[["ID", "Cliente", "Trabajo", "Contador", "Fecha", "Timbrado_Estado", "Monto_PYG"]], use_container_width=True)
 
-        factura_sel = st.selectbox(
-            "Seleccione la Factura a actualizar:",
-            st.session_state.facturas.apply(lambda r: f"Factura #{r['ID']} - {r['Cliente']} (Estado: {r['Timbrado_Estado']})", axis=1)
-        )
-        id_fact_sel = int(factura_sel.split(" ")[0].replace("Factura", "").replace("#", ""))
+            st.markdown("---")
+            st.subheader("✏️ Actualizar Estado de Timbrado")
 
-        nuevo_estado_t = st.radio(
-            "Marcar Nuevo Estado:",
-            [
-                "🔴 Pendiente de Firma",
-                "🟡 Firmado (En proceso)",
-                "🟢 Firmado y Devuelto a Imprenta"
-            ]
-        )
+            opciones_dict = {}
+            for _, r in facturas_con_timbrado.iterrows():
+                key_text = f"Factura #{r['ID']} - {r['Cliente']} ({r['Trabajo']}) [Estado: {r['Timbrado_Estado']}]"
+                opciones_dict[key_text] = int(r['ID'])
 
-        if st.button("💾 Actualizar Timbrado"):
-            idx = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_sel].index[0]
-            st.session_state.facturas.at[idx, "Timbrado_Estado"] = nuevo_estado_t
-            guardar_tabla(st.session_state.facturas, "Facturas")
-            st.success("✅ Estado de timbrado actualizado y guardado.")
-            st.rerun()
+            factura_sel_text = st.selectbox("Seleccione la Factura a actualizar:", list(opciones_dict.keys()))
+            id_fact_sel = opciones_dict[factura_sel_text]
+
+            nuevo_estado_t = st.radio(
+                "Marcar Nuevo Estado:",
+                [
+                    "🔴 Pendiente de Firma",
+                    "🟡 Firmado (En proceso)",
+                    "🟢 Firmado y Devuelto a Imprenta"
+                ]
+            )
+
+            if st.button("💾 Actualizar Timbrado"):
+                idx = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_sel].index[0]
+                st.session_state.facturas.at[idx, "Timbrado_Estado"] = nuevo_estado_t
+                guardar_tabla(st.session_state.facturas, "Facturas")
+                st.success("✅ Estado de timbrado actualizado y guardado.")
+                st.rerun()
     else:
         st.info("Aún no hay facturas registradas.")
 
@@ -280,13 +298,14 @@ elif menu == "💵 Cobranzas de Facturas":
         if facturas_pendientes.empty:
             st.success("🎉 Todas las facturas registradas están totalmente cobradas.")
         else:
-            opciones = facturas_pendientes.apply(
-                lambda row: f"Factura #{row['ID']} - {row['Cliente']} (Pendiente: {formatear_pyg(row['Monto_PYG'] - row['Monto_Pagado'])})", 
-                axis=1
-            )
+            opciones_dict = {}
+            for _, row in facturas_pendientes.iterrows():
+                pend = row['Monto_PYG'] - row['Monto_Pagado']
+                key_text = f"Factura #{row['ID']} - {row['Cliente']} [{row['Trabajo']}] (Pendiente: {formatear_pyg(pend)})"
+                opciones_dict[key_text] = int(row['ID'])
             
-            seleccion = st.selectbox("Seleccione Factura a Cobrar:", opciones)
-            factura_id_sel = int(seleccion.split(" ")[0].replace("Factura", "").replace("#", ""))
+            seleccion = st.selectbox("Seleccione Factura a Cobrar:", list(opciones_dict.keys()))
+            factura_id_sel = opciones_dict[seleccion]
             
             factura_actual = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].iloc[0]
             monto_pendiente = factura_actual["Monto_PYG"] - factura_actual["Monto_Pagado"]
@@ -303,7 +322,7 @@ elif menu == "💵 Cobranzas de Facturas":
                     )
                     fecha_pago = st.date_input("Fecha de Cobro", value=FECHA_ACTUAL, format="DD/MM/YYYY")
                 with c2:
-                    concepto_pago = st.text_input("Concepto", value=f"Cobro Factura #{factura_id_sel} - {factura_actual['Cliente']}")
+                    concepto_pago = st.text_input("Concepto", value=f"Cobro Factura #{factura_id_sel} - {factura_actual['Cliente']} ({factura_actual['Trabajo']})")
 
                 if st.form_submit_button("💳 Registrar Pago en Banco Itaú"):
                     idx = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].index[0]
