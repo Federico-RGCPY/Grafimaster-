@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-import re
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -36,34 +35,17 @@ scopes = [
 
 @st.cache_resource
 def obtener_cliente_gspread():
-    """Autentica con la cuenta de servicio extrayendo y limpiando el bloque PEM."""
+    """Autentica con la cuenta de servicio procesando correctamente la clave privada."""
     creds_dict = dict(st.secrets["gcp_service_account"])
     
-    raw_key = str(creds_dict["private_key"])
-    
-    # 1. Reemplazar saltos de línea literales '\\n' por saltos reales '\n'
-    raw_key = raw_key.replace("\\n", "\n")
-    
-    # 2. Extraer el bloque base64 entre el inicio y el fin de la clave PEM
-    inicio = "-----BEGIN PRIVATE KEY-----"
-    fin = "-----END PRIVATE KEY-----"
-    
-    if inicio in raw_key and fin in raw_key:
-        # Extraer todo lo que está entre el BEGIN y END
-        contenido = raw_key.split(inicio)[1].split(fin)[0]
-        # Remover espacios, comillas y caracteres extraños de los extremos
-        cuerpo_base64 = re.sub(r'[^A-Za-z0-9+/=]', '', contenido)
-        
-        # Dividir la clave en líneas estándar de 64 caracteres PEM
-        lineas = [cuerpo_base64[i:i+64] for i in range(0, len(cuerpo_base64), 64)]
-        cuerpo_formateado = "\n".join(lineas)
-        
-        # Reconstruir la clave PEM limpia de forma garantizada
-        p_key = f"{inicio}\n{cuerpo_formateado}\n{fin}\n"
-    else:
-        p_key = raw_key.strip("'\"")
-
-    creds_dict["private_key"] = p_key
+    if "private_key" in creds_dict:
+        pk = str(creds_dict["private_key"])
+        # Reemplazar la secuencia literal '\\n' por saltos de línea reales '\n'
+        pk = pk.replace("\\n", "\n")
+        # Remover comillas de inicio/fin si las conserva el formato TOML
+        if (pk.startswith('"') and pk.endswith('"')) or (pk.startswith("'") and pk.endswith("'")):
+            pk = pk[1:-1]
+        creds_dict["private_key"] = pk
 
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(credentials)
