@@ -1,5 +1,6 @@
-streamlit
+streamlit==1.40.0
+starlette==0.41.3
 pandas
-openpyxl
 gspread
 google-auth
+pillow
