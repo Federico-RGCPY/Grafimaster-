@@ -4,6 +4,7 @@ from datetime import datetime, date
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+import hmac
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURACIÓN DE PÁGINA Y PREVENCIÓN DE ERRORES DE TRADUCCIÓN DEL NAVEGADOR
@@ -25,6 +26,50 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+# -----------------------------------------------------------------------------
+# CONTROL DE ACCESO / AUTENTICACIÓN (CONTRASEÑA: Mafe2026)
+# -----------------------------------------------------------------------------
+def verificar_autenticacion():
+    """Valida la contraseña y bloquea el resto de la app hasta que sea correcta."""
+    if st.session_state.get("autenticado", False):
+        return True
+
+    clave_correcta = "Mafe2026"
+
+    col_izq, col_centro, col_der = st.columns([1, 1.2, 1])
+    with col_centro:
+        st.markdown(
+            """
+            <div style='background: #1e293b; color: white; padding: 25px; border-radius: 15px; text-align: center; margin-bottom: 20px;'>
+                <h2 style='margin: 0; color: white;'>🔒 ACCESO RESTRINGIDO</h2>
+                <p style='color: #94a3b8; margin: 8px 0 0 0;'>Sistema de Facturación - Banco Itaú</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        with st.form("form_login"):
+            password_ingresada = st.text_input("Contraseña de Acceso", type="password", placeholder="••••••••")
+            submit = st.form_submit_button("Ingresar al Sistema", use_container_width=True)
+
+            if submit:
+                if hmac.compare_digest(password_ingresada, clave_correcta):
+                    st.session_state["autenticado"] = True
+                    st.success("Acceso concedido.")
+                    st.rerun()
+                else:
+                    st.error("❌ Contraseña incorrecta. Intente nuevamente.")
+
+    st.stop()
+
+verificar_autenticacion()
+
+with st.sidebar:
+    st.caption("👤 Sesión iniciada")
+    if st.button("🚪 Cerrar Sesión", use_container_width=True):
+        st.session_state["autenticado"] = False
+        st.rerun()
 
 # -----------------------------------------------------------------------------
 # 2. CONEXIÓN DIRECTA NATIVA A GOOGLE SHEETS (GSPREAD)
@@ -234,7 +279,6 @@ if menu == "📊 Estado de Cuenta & Dashboard":
     facturas_validas = st.session_state.facturas[st.session_state.facturas["Estado"] != "Anulada"].copy() if not st.session_state.facturas.empty else pd.DataFrame()
 
     if not facturas_validas.empty:
-        # Convertir columna Fecha a datetime para filtrar mes y año
         facturas_validas["Fecha_DT"] = pd.to_datetime(facturas_validas["Fecha"], errors='coerce')
         facturas_mes = facturas_validas[
             (facturas_validas["Fecha_DT"].dt.month == mes_sel) & 
@@ -302,11 +346,9 @@ elif menu == "👨‍💼 Reporte por Contador":
             df_filtrado = df_validas.copy()
             df_filtrado["Fecha_DT"] = pd.to_datetime(df_filtrado["Fecha"], errors='coerce')
 
-            # Filtrar Contador
             if contador_seleccionado != "-- Todos los Contadores --":
                 df_filtrado = df_filtrado[df_filtrado["Contador"] == contador_seleccionado]
 
-            # Filtrar Mes y Año
             if mes_rep != 0:
                 df_filtrado = df_filtrado[
                     (df_filtrado["Fecha_DT"].dt.month == mes_rep) & 
@@ -315,7 +357,6 @@ elif menu == "👨‍💼 Reporte por Contador":
             else:
                 df_filtrado = df_filtrado[df_filtrado["Fecha_DT"].dt.year == anio_rep]
 
-            # Métricas
             tot_fact = df_filtrado["Monto_PYG"].sum()
             tot_cob = df_filtrado["Monto_Pagado"].sum()
             tot_pend = tot_fact - tot_cob
@@ -327,11 +368,9 @@ elif menu == "👨‍💼 Reporte por Contador":
 
             st.markdown("---")
 
-            # Preparar exportación
             df_export = df_filtrado.copy()
             df_export["Saldo_Pendiente"] = df_export["Monto_PYG"] - df_export["Monto_Pagado"]
             
-            # Quitar columna auxiliar
             if "Fecha_DT" in df_export.columns:
                 df_export = df_export.drop(columns=["Fecha_DT"])
 
@@ -449,201 +488,4 @@ elif menu == "📋 Registrar y Anular Facturas":
 
                 factura_obj = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_anular].iloc[0]
 
-                st.warning(f"⚠️ **Atención:** Se anulará la Factura #{id_fact_anular} de **{factura_obj['Cliente']}** por {formatear_pyg(factura_obj['Monto_PYG'])}.")
-
-                if st.button("🔴 Confirmar Anulación de la Factura"):
-                    idx_f = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_anular].index[0]
-                    
-                    st.session_state.facturas.at[idx_f, "Estado"] = "Anulada"
-                    st.session_state.facturas.at[idx_f, "Monto_Pagado"] = 0.0
-
-                    if not st.session_state.banco.empty:
-                        st.session_state.banco = st.session_state.banco[st.session_state.banco["Factura_ID"] != id_fact_anular]
-                        guardar_tabla(st.session_state.banco, "Banco_Itau")
-
-                    guardar_tabla(st.session_state.facturas, "Facturas")
-                    st.success(f"✅ Factura #{id_fact_anular} anulada correctamente.")
-                    st.rerun()
-        else:
-            st.info("No hay facturas registradas para anular.")
-
-# =============================================================================
-# MÓDULO 4: GESTIONAR TIMBRADOS
-# =============================================================================
-elif menu == "🏷️ Gestionar Timbrados":
-    st.header("🏷️ Control de Timbrados: Firmados y Devueltos a Imprenta")
-
-    if not st.session_state.facturas.empty:
-        facturas_con_timbrado = st.session_state.facturas[
-            (st.session_state.facturas["Aplica_Timbrado"] != "No") & 
-            (st.session_state.facturas["Estado"] != "Anulada")
-        ]
-
-        if facturas_con_timbrado.empty:
-            st.info("No hay facturas activas que requieran timbrado.")
-        else:
-            df_show = facturas_con_timbrado.copy()
-            df_show["Fecha"] = df_show["Fecha"].apply(formatear_fecha)
-            df_show["Monto_PYG"] = df_show["Monto_PYG"].apply(formatear_pyg)
-            st.dataframe(df_show[["ID", "Cliente", "Trabajo", "Contador", "Fecha", "Timbrado_Estado", "Monto_PYG"]], use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("✏️ Actualizar Estado de Timbrado")
-
-            opciones_dict = {}
-            for _, r in facturas_con_timbrado.iterrows():
-                key_text = f"Factura #{r['ID']} - {r['Cliente']} ({r['Trabajo']}) [Estado: {r['Timbrado_Estado']}]"
-                opciones_dict[key_text] = int(r['ID'])
-
-            factura_sel_text = st.selectbox("Seleccione la Factura a actualizar:", list(opciones_dict.keys()))
-            id_fact_sel = opciones_dict[factura_sel_text]
-
-            nuevo_estado_t = st.radio(
-                "Marcar Nuevo Estado:",
-                [
-                    "🔴 Pendiente de Firma",
-                    "🟡 Firmado (En proceso)",
-                    "🟢 Firmado y Devuelto a Imprenta"
-                ]
-            )
-
-            if st.button("💾 Actualizar Timbrado"):
-                idx = st.session_state.facturas[st.session_state.facturas["ID"] == id_fact_sel].index[0]
-                st.session_state.facturas.at[idx, "Timbrado_Estado"] = nuevo_estado_t
-                guardar_tabla(st.session_state.facturas, "Facturas")
-                st.success("✅ Estado de timbrado actualizado y guardado.")
-                st.rerun()
-    else:
-        st.info("Aún no hay facturas registradas.")
-
-# =============================================================================
-# MÓDULO 5: COBRANZAS DE FACTURAS
-# =============================================================================
-elif menu == "💵 Cobranzas de Facturas":
-    st.header("💵 Registrar Cobranza (Efectivo o Banco Itaú)")
-
-    if not st.session_state.facturas.empty:
-        facturas_pendientes = st.session_state.facturas[
-            (st.session_state.facturas["Estado"] != "Pagado Total") & 
-            (st.session_state.facturas["Estado"] != "Anulada")
-        ]
-        
-        if facturas_pendientes.empty:
-            st.success("🎉 Todas las facturas activas están totalmente cobradas.")
-        else:
-            opciones_dict = {}
-            for _, row in facturas_pendientes.iterrows():
-                pend = float(row['Monto_PYG']) - float(row['Monto_Pagado'])
-                key_text = f"Factura #{row['ID']} - {row['Cliente']} [{row['Trabajo']}] - Contador: {row['Contador']} (Pendiente: {formatear_pyg(pend)})"
-                opciones_dict[key_text] = int(row['ID'])
-            
-            seleccion = st.selectbox("Seleccione Factura a Cobrar:", list(opciones_dict.keys()))
-            factura_id_sel = opciones_dict[seleccion]
-            
-            factura_actual = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].iloc[0]
-            monto_pendiente = float(factura_actual["Monto_PYG"]) - float(factura_actual["Monto_Pagado"])
-
-            with st.form("form_cobro"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    monto_a_cobrar = st.number_input(
-                        f"Monto a Cobrar (Pendiente: {formatear_pyg(monto_pendiente)})", 
-                        min_value=1.0, 
-                        max_value=float(monto_pendiente), 
-                        value=float(monto_pendiente),
-                        step=100000.0
-                    )
-                    fecha_pago = st.date_input("Fecha de Cobro", value=FECHA_ACTUAL, format="DD/MM/YYYY")
-                with c2:
-                    metodo_pago = st.selectbox("Medio de Cobro:", ["🏦 Depósito / Transferencia Banco Itaú", "💵 Efectivo / Caja Chica"])
-                    concepto_pago = st.text_input("Concepto / Referencia", value=f"Cobro Factura #{factura_id_sel} - {factura_actual['Cliente']} ({factura_actual['Trabajo']})")
-
-                if st.form_submit_button("💳 Registrar Pago"):
-                    idx = st.session_state.facturas[st.session_state.facturas["ID"] == factura_id_sel].index[0]
-                    nuevo_pagado = float(st.session_state.facturas.at[idx, "Monto_Pagado"]) + monto_a_cobrar
-                    st.session_state.facturas.at[idx, "Monto_Pagado"] = nuevo_pagado
-                    
-                    if nuevo_pagado >= float(st.session_state.facturas.at[idx, "Monto_PYG"]):
-                        st.session_state.facturas.at[idx, "Estado"] = "Pagado Total"
-                    else:
-                        st.session_state.facturas.at[idx, "Estado"] = "Pagado Parcial"
-
-                    if "Banco Itaú" in metodo_pago:
-                        nuevo_id_banco = len(st.session_state.banco) + 1
-                        nuevo_mov_banco = {
-                            "ID": nuevo_id_banco,
-                            "Fecha": str(fecha_pago),
-                            "Tipo": "Ingreso (Cobro)",
-                            "Concepto": concepto_pago,
-                            "Cliente_Asociado": factura_actual["Cliente"],
-                            "Factura_ID": factura_id_sel,
-                            "Monto_PYG": float(monto_a_cobrar)
-                        }
-                        st.session_state.banco = pd.concat([st.session_state.banco, pd.DataFrame([nuevo_mov_banco])], ignore_index=True)
-                        guardar_tabla(st.session_state.banco, "Banco_Itau")
-
-                    guardar_tabla(st.session_state.facturas, "Facturas")
-                    st.success(f"✅ Cobro registrado por {metodo_pago}.")
-                    st.rerun()
-    else:
-        st.info("No existen facturas registradas.")
-
-# =============================================================================
-# MÓDULO 6: MOVIMIENTOS BANCO ITAÚ
-# =============================================================================
-elif menu == "🏦 Movimientos Banco Itaú":
-    st.header("🏦 Libro de Banco Itaú (Ingresos & Egresos Directos)")
-
-    with st.form("form_mov_banco", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            tipo = st.selectbox("Tipo de Transacción", ["Ingreso Directo", "Egreso / Gasto"])
-            concepto = st.text_input("Concepto / Descripción *", placeholder="Ej: Pago de alquiler, Honorarios")
-            cliente_ref = st.text_input("Cliente / Proveedor Referencia", placeholder="Opcional")
-        with col2:
-            monto_mov = st.number_input("Monto en Guaraníes (₲) *", min_value=1.0, step=100000.0, value=250000.0)
-            fecha_mov = st.date_input("Fecha del Movimiento", value=FECHA_ACTUAL, format="DD/MM/YYYY")
-
-        if st.form_submit_button("💾 Guardar Movimiento"):
-            if not concepto:
-                st.error("Debes ingresar un concepto.")
-            else:
-                monto_final = float(monto_mov) if tipo == "Ingreso Directo" else -float(monto_mov)
-                nuevo_mov = {
-                    "ID": len(st.session_state.banco) + 1,
-                    "Fecha": str(fecha_mov),
-                    "Tipo": tipo,
-                    "Concepto": concepto.strip(),
-                    "Cliente_Asociado": cliente_ref.strip() if cliente_ref else "N/A",
-                    "Factura_ID": "N/A",
-                    "Monto_PYG": monto_final
-                }
-                st.session_state.banco = pd.concat([st.session_state.banco, pd.DataFrame([nuevo_mov])], ignore_index=True)
-                guardar_tabla(st.session_state.banco, "Banco_Itau")
-                st.success(f"✅ Movimiento registrado con éxito.")
-                st.rerun()
-
-    st.subheader("📋 Historial de Movimientos")
-    if not st.session_state.banco.empty:
-        df_b_disp = st.session_state.banco.copy()
-        df_b_disp["Fecha"] = df_b_disp["Fecha"].apply(formatear_fecha)
-        df_b_disp["Monto_PYG"] = df_b_disp["Monto_PYG"].apply(formatear_pyg)
-        st.dataframe(df_b_disp, use_container_width=True)
-
-# =============================================================================
-# MÓDULO 7: CONFIGURAR SALDO INICIAL
-# =============================================================================
-elif menu == "⚙️ Configurar Saldo Inicial":
-    st.header("⚙️ Ajuste de Saldo Inicial del Banco Itaú")
-
-    saldo_actual_conf = st.session_state.saldo_inicial
-    st.write(f"**Saldo Inicial Activo:** {formatear_pyg(saldo_actual_conf)}")
-
-    with st.form("form_saldo_inicial"):
-        nuevo_saldo = st.number_input("Establecer Saldo Inicial (en Guaraníes ₲):", value=float(saldo_actual_conf), step=1000000.0, min_value=0.0)
-        if st.form_submit_button("💾 Actualizar Saldo Inicial"):
-            st.session_state.saldo_inicial = float(nuevo_saldo)
-            df_conf = pd.DataFrame([{"Clave": "Saldo_Inicial", "Valor": nuevo_saldo}])
-            guardar_tabla(df_conf, "Configuracion")
-            st.success(f"✅ Saldo Inicial actualizado a {formatear_pyg(nuevo_saldo)}.")
-            st.rerun()
+                st.warning(f"⚠️ **Atención:** Se anulará la Factura #{id_fact_anular} de **
