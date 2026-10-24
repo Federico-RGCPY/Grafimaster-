@@ -211,4 +211,259 @@ HEADERS_CONFIG = ["Banco", "Saldo_Inicial"]
 sh_test, err_test = conectar_sheet()
 if not sh_test:
     st.error(f"⚠️ **Error de conexión con Google Sheets:** `{err_test}`")
-    st.info(f"ID en uso: `{SPREADSHEET_
+    st.info(f"ID en uso: `{SPREADSHEET_ID}`. Revisa los permisos de edición para la cuenta de servicio.")
+
+# -----------------------------------------------------------------------------
+# 4. MENÚ PRINCIPAL
+# -----------------------------------------------------------------------------
+menu = st.radio(
+    "Navegación:",
+    ["📊 Resumen & Timbrados", "📄 Facturas Emitidas", "💳 Movimientos Bancarios", "🔄 Transferir Entre Bancos", "⚙️ Configurar Saldos Iniciales"],
+    horizontal=True
+)
+
+st.markdown("---")
+
+# =============================================================================
+# MÓDULO 1: RESUMEN DE GRAFIMASTER Y TIMBRADOS
+# =============================================================================
+if menu == "📊 Resumen & Timbrados":
+    st.subheader("🏦 Estado Financiero y Control de Timbrados")
+
+    df_config = obtener_datos("Config_Bancos", HEADERS_CONFIG)
+    df_mov = obtener_datos("Movimientos_Banco", HEADERS_MOVIMIENTOS)
+    df_fac = obtener_datos("Facturas", HEADERS_FACTURAS)
+
+    saldo_ini_bice = 0.0
+    saldo_ini_fala = 0.0
+
+    if not df_config.empty:
+        for _, r in df_config.iterrows():
+            b_nom = str(r.get("banco", r.get("col_0", ""))).strip().lower()
+            try:
+                m_val = float(r.get("saldo_inicial", r.get("saldo_inicial_clp", r.get("col_1", 0))))
+            except Exception:
+                m_val = 0.0
+
+            if "bice" in b_nom:
+                saldo_ini_bice = m_val
+            elif "falabella" in b_nom:
+                saldo_ini_fala = m_val
+
+    ingresos_bice, egresos_bice = 0.0, 0.0
+    ingresos_fala, egresos_fala = 0.0, 0.0
+
+    if not df_mov.empty:
+        for _, r in df_mov.iterrows():
+            b = str(r.get("banco", r.get("col_1", ""))).strip().lower()
+            tipo = str(r.get("tipo", r.get("col_2", ""))).strip().lower()
+            try:
+                monto = float(r.get("monto", r.get("monto_clp", r.get("col_3", 0))))
+            except Exception:
+                monto = 0.0
+
+            if "bice" in b:
+                if "ingreso" in tipo: ingresos_bice += monto
+                else: egresos_bice += monto
+            elif "falabella" in b:
+                if "ingreso" in tipo: ingresos_fala += monto
+                else: egresos_fala += monto
+
+    saldo_fin_bice = saldo_ini_bice + ingresos_bice - egresos_bice
+    saldo_fin_fala = saldo_ini_fala + ingresos_fala - egresos_fala
+
+    total_cobrado = 0.0
+    total_pendiente = 0.0
+    timbrados_firmados = 0
+    timbrados_pendientes = 0
+
+    if not df_fac.empty:
+        for _, r in df_fac.iterrows():
+            try:
+                m_tot = float(r.get("monto", r.get("monto_clp", r.get("col_2", 0))))
+            except Exception:
+                m_tot = 0.0
+            try:
+                m_pag = float(r.get("monto_pagado", r.get("col_5", 0)))
+            except Exception:
+                m_pag = 0.0
+            try:
+                m_pend = float(r.get("saldo_pendiente", r.get("col_6", m_tot - m_pag)))
+            except Exception:
+                m_pend = max(0.0, m_tot - m_pag)
+
+            t_estado = str(r.get("estado_timbrado", r.get("col_7", "Pendiente de Firma"))).strip().lower()
+            if "firmado" in t_estado:
+                timbrados_firmados += 1
+            else:
+                timbrados_pendientes += 1
+
+            total_cobrado += m_pag
+            total_pendiente += m_pend
+
+    disponibilidad_total = saldo_fin_bice + saldo_fin_fala + total_pendiente
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("🏦 Banco BICE", f"${saldo_fin_bice:,.0f}", delta=f"Inicial: ${saldo_ini_bice:,.0f}")
+    with c2:
+        st.metric("💳 Banco Falabella", f"${saldo_fin_fala:,.0f}", delta=f"Inicial: ${saldo_ini_fala:,.0f}")
+    with c3:
+        st.metric("⏳ Facturas Pendientes", f"${total_pendiente:,.0f}", delta=f"Cobrado: ${total_cobrado:,.0f}", delta_color="normal")
+    with c4:
+        st.metric("💰 Disponibilidad Total", f"${disponibilidad_total:,.0f}", help="Suma de Bancos + Facturas Pendientes de Cobro")
+
+    st.markdown("---")
+    st.markdown("### ✍️ Estadísticas de Timbrados y Firmas")
+    total_timbrados = timbrados_firmados + timbrados_pendientes
+    pct_firmado = (timbrados_firmados / total_timbrados * 100) if total_timbrados > 0 else 0.0
+
+    st1, st2, st3 = st.columns(3)
+    with st1:
+        st.metric("📄 Total Timbrados Registrados", f"{total_timbrados} Documentos")
+    with st2:
+        st.metric("✅ Timbrados Firmados", f"{timbrados_firmados}", delta=f"{pct_firmado:.1f}% Completado")
+    with st3:
+        st.metric("⏳ Faltan por Firmar", f"{timbrados_pendientes}", delta=f"{100-pct_firmado:.1f}% Pendiente", delta_color="inverse")
+
+    st.markdown("---")
+    st.markdown("### 📋 Historial de Movimientos Bancarios")
+    if not df_mov.empty:
+        st.dataframe(df_mov, use_container_width=True)
+    else:
+        st.info("No hay movimientos registrados en los bancos.")
+
+# =============================================================================
+# MÓDULO 2: FACTURAS EMITIDAS
+# =============================================================================
+elif menu == "📄 Facturas Emitidas":
+    st.subheader("📄 Registro y Gestión de Facturas de Grafimaster")
+
+    with st.expander("➕ Emitir Nueva Factura", expanded=True):
+        with st.form("form_factura", clear_on_submit=True):
+            f1, f2 = st.columns(2)
+            with f1:
+                f_num_custom = st.text_input("Nº de Factura *", placeholder="Ej: 1024 o FAC-00125")
+                f_cli = st.text_input("Cliente *", placeholder="Ej: Imprenta Central")
+                f_monto = st.number_input("Monto Total *", min_value=1.0, step=10000.0)
+            with f2:
+                f_fecha = st.date_input("Fecha de Emisión", value=date.today())
+                f_estado = st.selectbox("Estado de Pago Inicial", ["Pendiente", "Pagado"])
+                f_timbrado = st.selectbox("Estado de Timbrado / Firma", ["Pendiente de Firma", "Firmado"])
+                banco_destino = st.selectbox("Si está Pagada, ¿a qué Banco ingresa?", ["Bice", "Falabella"])
+
+            sub_fact = st.form_submit_button("💾 Guardar Factura")
+            if sub_fact:
+                if not f_num_custom.strip():
+                    st.error("Debes ingresar el Nº de Factura.")
+                elif not f_cli.strip():
+                    st.error("Debes ingresar el nombre del cliente.")
+                else:
+                    new_id = f_num_custom.strip()
+                    m_pagado = f_monto if f_estado == "Pagado" else 0.0
+                    s_pendiente = 0.0 if f_estado == "Pagado" else f_monto
+                    datos_fac = [new_id, f_cli.strip(), f_monto, str(f_fecha), f_estado, m_pagado, s_pendiente, f_timbrado]
+                    ok, err = agregar_fila("Facturas", datos_fac, HEADERS_FACTURAS)
+                    
+                    if ok:
+                        if f_estado == "Pagado":
+                            id_m = f"MOV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                            reg_mov = [id_m, banco_destino, "Ingreso", f_monto, str(f_fecha), f_cli.strip(), f"Pago de Factura Nº {new_id}"]
+                            agregar_fila("Movimientos_Banco", reg_mov, HEADERS_MOVIMIENTOS)
+                            
+                            st.session_state["ultimo_recibo"] = {
+                                "num_fac": new_id,
+                                "cliente": f_cli.strip(),
+                                "monto": f_monto,
+                                "fecha": str(f_fecha),
+                                "banco": banco_destino
+                            }
+                        st.success(f"Factura Nº {new_id} registrada correctamente.")
+                        st.rerun()
+                    else:
+                        st.error(f"Error al guardar: {err}")
+
+    if "ultimo_recibo" in st.session_state:
+        rec = st.session_state["ultimo_recibo"]
+        st.markdown(
+            f"""
+            <div class='recibo-box'>
+                <h3 style='color: #15803d; margin-top: 0;'>🧾 RECIBO DE DINERO GENERADO</h3>
+                <p><b>Recibimos de:</b> {rec['cliente']}<br>
+                <b>Monto Pago:</b> ${rec['monto']:,.0f}<br>
+                <b>Concepto:</b> Pago de Factura Nº {rec['num_fac']}<br>
+                <b>Fecha Pago:</b> {rec['fecha']} | <b>Banco Destino:</b> {rec['banco']}<br>
+                <b>Emitido por:</b> Grafimaster</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        txt_recibo = f"🧾 *RECIBO DE DINERO - GRAFIMASTER*\n\nRecibimos de *{rec['cliente']}* la suma de *${rec['monto']:,.0f}* en concepto de pago de Factura Nº *{rec['num_fac']}* con fecha *{rec['fecha']}* (Ingresado a {rec['banco']}).\n\n¡Muchas gracias por su preferencia!"
+        url_wa = f"https://api.whatsapp.com/send?text={urllib.parse.quote(txt_recibo)}"
+        
+        c_wa, c_close = st.columns([1, 1])
+        with c_wa:
+            st.markdown(f'<a href="{url_wa}" target="_blank" style="text-decoration:none;"><div style="background:#22c55e;color:white;padding:10px;border-radius:8px;text-align:center;font-weight:bold;">🟢 Enviar Recibo por WhatsApp</div></a>', unsafe_allow_html=True)
+        with c_close:
+            if st.button("❌ Cerrar Vista de Recibo"):
+                del st.session_state["ultimo_recibo"]
+                st.rerun()
+
+    st.markdown("### 📚 Listado de Facturas Emitidas")
+    df_fac = obtener_datos("Facturas", HEADERS_FACTURAS)
+
+    if not df_fac.empty:
+        for idx, r in df_fac.iterrows():
+            id_f = str(r.get("nº_factura", r.get("n°_factura", r.get("id_factura", r.get("col_0", "")))))
+            cli_f = str(r.get("cliente", r.get("col_1", "")))
+            try:
+                monto_f = float(r.get("monto", r.get("monto_clp", r.get("col_2", 0))))
+            except Exception:
+                monto_f = 0.0
+            fecha_f = str(r.get("fecha_emision", r.get("col_3", "")))
+            estado_f = str(r.get("estado", r.get("col_4", "Pendiente")))
+            try:
+                pagado_f = float(r.get("monto_pagado", r.get("col_5", 0)))
+            except Exception:
+                pagado_f = 0.0
+            try:
+                saldo_f = float(r.get("saldo_pendiente", r.get("col_6", monto_f)))
+            except Exception:
+                saldo_f = monto_f
+            timbrado_f = str(r.get("estado_timbrado", r.get("col_7", "Pendiente de Firma")))
+
+            fila_num = r.get("_fila_num")
+
+            col_info, col_acc = st.columns([0.8, 0.2])
+
+            with col_info:
+                st.markdown(
+                    f"""
+                    <div style="background: white; padding: 15px; border-radius: 10px; border-left: 5px solid {'#22c55e' if estado_f == 'Pagado' else '#f59e0b'}; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
+                        📄 <b>Nº Factura:</b> {id_f} | 👤 <b>Cliente:</b> {cli_f} | 📅 <b>Fecha:</b> {fecha_f}<br>
+                        💵 <b>Monto Facturado:</b> ${monto_f:,.0f} | 🟢 <b>Cobrado en Banco:</b> ${pagado_f:,.0f} \vert{} ⏳ <b>Pendiente:</b>${saldo_f:,.0f}<br>
+                        ✍️ <b>Estado Timbrado:</b> <span style="color: {'#16a34a' if timbrado_f == 'Firmado' else '#dc2626'}; font-weight: bold;">{timbrado_f}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            with col_acc:
+                ca1, ca2 = st.columns(2)
+                with ca1:
+                    if st.button("✏️", key=f"edit_fac_{fila_num}_{idx}", help="Editar / Cobrar / Firmar Factura"):
+                        st.session_state[f"edit_fac_mode_{fila_num}"] = not st.session_state.get(f"edit_fac_mode_{fila_num}", False)
+                with ca2:
+                    if st.button("❌", key=f"del_fac_{fila_num}_{idx}", help="Eliminar Factura"):
+                        ok_del, err_del = eliminar_fila("Facturas", fila_num, HEADERS_FACTURAS)
+                        if ok_del:
+                            st.success("Factura eliminada.")
+                            st.rerun()
+                        else:
+                            st.error(f"Error borrando: {err_del}")
+
+            if st.session_state.get(f"edit_fac_mode_{fila_num}", False):
+                with st.container():
+                    st.info(f"✏️ **Editando / Registrar Cobro de Factura Nº:** {id_f}")
+                    with st.form(f"form_edit_fac_{fila_num}"):
+                        fe1, fe2 = st.columns(2
