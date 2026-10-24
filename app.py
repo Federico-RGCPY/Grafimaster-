@@ -2,74 +2,492 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import json
+import urllib.parse
+import re
 import gspread
 from google.oauth2.service_account import Credentials
-import hmac
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y PREVENCIÓN DE ERRORES DE TRADUCCIÓN DEL NAVEGADOR
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Sistema de Facturación - Banco Itaú",
-    page_icon="🏦",
+    page_title="Grafimaster — Control Bancario & Facturación (CLP)",
+    page_icon="💼",
     layout="wide"
 )
 
-# Evita que traductores automáticos del navegador rompan la interfaz de Streamlit (error removeChild)
 st.markdown(
     """
-    <html lang="es">
-    <head>
-        <meta name="google" content="notranslate">
-    </head>
-    </html>
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;800&display=swap');
+    .stApp { background-color: #f8fafc; }
+    .header-box {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: white;
+        padding: 25px;
+        border-radius: 15px;
+        text-align: center;
+        margin-bottom: 25px;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    .header-title {
+        font-family: 'Montserrat', sans-serif;
+        font-size: 2.8rem;
+        font-weight: 800;
+        letter-spacing: 2px;
+        margin: 0;
+        color: #ffffff;
+    }
+    .header-sub {
+        color: #94a3b8;
+        font-size: 1.1rem;
+        margin-top: 5px;
+    }
+    .recibo-box {
+        background-color: #ffffff;
+        border: 2px dashed #22c55e;
+        border-radius: 12px;
+        padding: 20px;
+        margin-top: 15px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.1);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    """
+    <div class='header-box'>
+        <div class='header-title'>GRAFIMASTER</div>
+        <div class='header-sub'>Control Financiero, Movimientos Bancarios y Facturación (Pesos Chilenos - CLP $)</div>
+    </div>
     """,
     unsafe_allow_html=True
 )
 
 # -----------------------------------------------------------------------------
-# CONTROL DE ACCESO / AUTENTICACIÓN (CONTRASEÑA: Mafe2026)
+# 2. RESOLUCIÓN DE HOJA Y CREDENCIALES
 # -----------------------------------------------------------------------------
-def verificar_autenticacion():
-    """Valida la contraseña y bloquea el resto de la app hasta que sea correcta."""
-    if st.session_state.get("autenticado", False):
-        return True
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
-    clave_correcta = "Mafe2026"
+def obtener_spreadsheet_id():
+    # 1. Buscar en secrets si está configurado
+    if "spreadsheet" in st.secrets:
+        sec = st.secrets["spreadsheet"]
+        if "spreadsheet_id" in sec:
+            return str(sec["spreadsheet_id"]).strip()
+        if "spreadsheet_name" in sec:
+            val = str(sec["spreadsheet_name"]).strip()
+            match = re.search(r"/d/([a-zA-Z0-9-_]+)", val)
+            if match:
+                return match.group(1)
+            return val
+    # 2. ID detectado por defecto de tu hoja Grafimaster
+    return "1Sly0ibsn65FV-6iDM4OptFAbm15GHHWBzA1fd8R7q-U"
 
-    col_izq, col_centro, col_der = st.columns([1, 1.2, 1])
-    with col_centro:
+SPREADSHEET_ID = obtener_spreadsheet_id()
+
+def conectar_sheet():
+    creds_dict = None
+    if "gcp_service_account" in st.secrets:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+    elif "gcp_json" in st.secrets:
+        raw_val = str(st.secrets["gcp_json"]).strip()
+        try:
+            creds_dict = json.loads(raw_val, strict=False)
+        except Exception:
+            try:
+                # Quitar posibles comillas de bloque TOML
+                clean_json = raw_val.strip("'''").strip('"""').strip()
+                creds_dict = json.loads(clean_json, strict=False)
+            except Exception as e:
+                return None, f"Error al parsear gcp_json: {e}"
+
+    if not creds_dict:
+        return None, "No se encontraron credenciales en Secrets ([gcp_service_account] o gcp_json)."
+
+    try:
+        pk = creds_dict.get("private_key", "")
+        if "\\n" in pk:
+            creds_dict["private_key"] = pk.replace("\\n", "\n")
+
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(credentials)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        return sh, None
+    except Exception as e:
+        return None, str(e)
+
+def obtener_o_crear_pestaña(sh, nombre_pestana, encabezados_default):
+    try:
+        return sh.worksheet(nombre_pestana)
+    except Exception:
+        for ws in sh.worksheets():
+            if ws.title.strip().lower() == nombre_pestana.strip().lower():
+                return ws
+        ws = sh.add_worksheet(title=nombre_pestana, rows="100", cols="20")
+        ws.append_row(encabezados_default, value_input_option="USER_ENTERED")
+        return ws
+
+def limpiar_key(texto):
+    replacements = (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"))
+    s = str(texto).lower().strip()
+    for a, b in replacements:
+        s = s.replace(a, b)
+    return s
+
+def obtener_datos(pestana_nombre, encabezados_default):
+    sh, err = conectar_sheet()
+    if sh:
+        try:
+            ws = obtener_o_crear_pestaña(sh, pestana_nombre, encabezados_default)
+            vals = ws.get_all_values()
+            if len(vals) >= 1:
+                headers_raw = [str(h).strip() for h in vals[0]]
+                data = vals[1:]
+                rows_clean = []
+                for idx, r in enumerate(data):
+                    if not any(r):
+                        continue
+                    row_dict = {}
+                    for c_idx, val in enumerate(r):
+                        row_dict[f"col_{c_idx}"] = val
+                        if c_idx < len(headers_raw):
+                            clean_k = limpiar_key(headers_raw[c_idx])
+                            row_dict[clean_k] = val
+                            row_dict[headers_raw[c_idx]] = val
+                    row_dict["_fila_num"] = idx + 2
+                    rows_clean.append(row_dict)
+                return pd.DataFrame(rows_clean)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+def agregar_fila(pestana_nombre, fila_datos, encabezados_default):
+    sh, err = conectar_sheet()
+    if sh:
+        try:
+            ws = obtener_o_crear_pestaña(sh, pestana_nombre, encabezados_default)
+            ws.append_row([str(x) for x in fila_datos], value_input_option="USER_ENTERED")
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    return False, f"Sin conexión: {err}"
+
+def actualizar_fila(pestana_nombre, fila_num, datos_actualizados, encabezados_default):
+    sh, err = conectar_sheet()
+    if sh:
+        try:
+            ws = obtener_o_crear_pestaña(sh, pestana_nombre, encabezados_default)
+            num_cols = len(datos_actualizados)
+            col_letra = chr(64 + num_cols) if num_cols <= 26 else "H"
+            rango = f"A{fila_num}:{col_letra}{fila_num}"
+            ws.update(rango, [[str(x) for x in datos_actualizados]], value_input_option="USER_ENTERED")
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    return False, f"Sin conexión: {err}"
+
+def eliminar_fila(pestana_nombre, fila_num, encabezados_default):
+    sh, err = conectar_sheet()
+    if sh:
+        try:
+            ws = obtener_o_crear_pestaña(sh, pestana_nombre, encabezados_default)
+            ws.delete_rows(int(fila_num))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    return False, f"Sin conexión: {err}"
+
+HEADERS_FACTURAS = ["Nº_Factura", "Cliente", "Monto_CLP", "Fecha_Emision", "Estado", "Monto_Pagado", "Saldo_Pendiente", "Estado_Timbrado"]
+HEADERS_MOVIMIENTOS = ["ID_Movimiento", "Banco", "Tipo", "Monto_CLP", "Fecha", "Cliente_Asociado", "Detalle"]
+HEADERS_CONFIG = ["Banco", "Saldo_Inicial_CLP"]
+
+# -----------------------------------------------------------------------------
+# 3. VERIFICACIÓN VISIBLE DE ESTADO
+# -----------------------------------------------------------------------------
+sh_test, err_test = conectar_sheet()
+if not sh_test:
+    st.error(f"⚠️ **Error de conexión con Google Sheets:** `{err_test}`")
+    st.info(f"ID de hoja en uso: `{SPREADSHEET_ID}`. Asegúrate de haber compartido la hoja como 'Editor' con: `streamlit-bot@facturacion-grafimaster.iam.gserviceaccount.com`")
+
+# -----------------------------------------------------------------------------
+# 4. MENÚ PRINCIPAL
+# -----------------------------------------------------------------------------
+menu = st.radio(
+    "Navegación:",
+    ["📊 Resumen & Timbrados", "📄 Facturas Emitidas", "💳 Movimientos Bancarios", "🔄 Transferir Entre Bancos", "⚙️ Configurar Saldos Iniciales"],
+    horizontal=True
+)
+
+st.markdown("---")
+
+# =============================================================================
+# MÓDULO 1: RESUMEN Y TIMBRADOS
+# =============================================================================
+if menu == "📊 Resumen & Timbrados":
+    st.subheader("🏦 Estado Financiero y Estadísticas de Timbrados (CLP)")
+
+    df_config = obtener_datos("Config_Bancos", HEADERS_CONFIG)
+    df_mov = obtener_datos("Movimientos_Banco", HEADERS_MOVIMIENTOS)
+    df_fac = obtener_datos("Facturas", HEADERS_FACTURAS)
+
+    saldo_ini_bice = 0.0
+    saldo_ini_fala = 0.0
+
+    if not df_config.empty:
+        for _, r in df_config.iterrows():
+            b_nom = str(r.get("banco", r.get("col_0", ""))).strip().lower()
+            try:
+                m_val = float(r.get("saldo_inicial_clp", r.get("saldo_inicial_usd", r.get("col_1", 0))))
+            except Exception:
+                m_val = 0.0
+
+            if "bice" in b_nom:
+                saldo_ini_bice = m_val
+            elif "falabella" in b_nom:
+                saldo_ini_fala = m_val
+
+    ingresos_bice, egresos_bice = 0.0, 0.0
+    ingresos_fala, egresos_fala = 0.0, 0.0
+
+    if not df_mov.empty:
+        for _, r in df_mov.iterrows():
+            b = str(r.get("banco", r.get("col_1", ""))).strip().lower()
+            tipo = str(r.get("tipo", r.get("col_2", ""))).strip().lower()
+            try:
+                monto = float(r.get("monto_clp", r.get("monto_usd", r.get("col_3", 0))))
+            except Exception:
+                monto = 0.0
+
+            if "bice" in b:
+                if "ingreso" in tipo: ingresos_bice += monto
+                else: egresos_bice += monto
+            elif "falabella" in b:
+                if "ingreso" in tipo: ingresos_fala += monto
+                else: egresos_fala += monto
+
+    saldo_fin_bice = saldo_ini_bice + ingresos_bice - egresos_bice
+    saldo_fin_fala = saldo_ini_fala + ingresos_fala - egresos_fala
+
+    total_cobrado = 0.0
+    total_pendiente = 0.0
+    timbrados_firmados = 0
+    timbrados_pendientes = 0
+
+    if not df_fac.empty:
+        for _, r in df_fac.iterrows():
+            try:
+                m_tot = float(r.get("monto_clp", r.get("monto_usd", r.get("col_2", 0))))
+            except Exception:
+                m_tot = 0.0
+            try:
+                m_pag = float(r.get("monto_pagado", r.get("col_5", 0)))
+            except Exception:
+                m_pag = 0.0
+            try:
+                m_pend = float(r.get("saldo_pendiente", r.get("col_6", m_tot - m_pag)))
+            except Exception:
+                m_pend = max(0.0, m_tot - m_pag)
+
+            t_estado = str(r.get("estado_timbrado", r.get("col_7", "Pendiente de Firma"))).strip().lower()
+            if "firmado" in t_estado:
+                timbrados_firmados += 1
+            else:
+                timbrados_pendientes += 1
+
+            total_cobrado += m_pag
+            total_pendiente += m_pend
+
+    disponibilidad_total = saldo_fin_bice + saldo_fin_fala + total_pendiente
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("🏦 Banco BICE", f"${saldo_fin_bice:,.0f} CLP", delta=f"Inicial: ${saldo_ini_bice:,.0f}")
+    with c2:
+        st.metric("💳 Banco Falabella", f"${saldo_fin_fala:,.0f} CLP", delta=f"Inicial: ${saldo_ini_fala:,.0f}")
+    with c3:
+        st.metric("⏳ Facturas Pendientes", f"${total_pendiente:,.0f} CLP", delta=f"Cobrado: ${total_cobrado:,.0f}", delta_color="normal")
+    with c4:
+        st.metric("💰 Disponibilidad Total", f"${disponibilidad_total:,.0f} CLP", help="Suma de Bancos + Facturas Pendientes de Pago")
+
+    st.markdown("---")
+    st.markdown("### ✍️ Estadísticas de Timbrados y Firmas")
+    total_timbrados = timbrados_firmados + timbrados_pendientes
+    pct_firmado = (timbrados_firmados / total_timbrados * 100) if total_timbrados > 0 else 0.0
+
+    st1, st2, st3 = st.columns(3)
+    with st1:
+        st.metric("📄 Total Timbrados", f"{total_timbrados} Facturas")
+    with st2:
+        st.metric("✅ Timbrados Firmados", f"{timbrados_firmados}", delta=f"{pct_firmado:.1f}%")
+    with st3:
+        st.metric("⏳ Faltan por Firmar", f"{timbrados_pendientes}", delta=f"{100-pct_firmado:.1f}% Pendiente", delta_color="inverse")
+
+    st.markdown("---")
+    st.markdown("### 📋 Historial de Movimientos Bancarios")
+    if not df_mov.empty:
+        st.dataframe(df_mov, use_container_width=True)
+    else:
+        st.info("No hay movimientos registrados en los bancos.")
+
+# =============================================================================
+# MÓDULO 2: FACTURAS EMITIDAS
+# =============================================================================
+elif menu == "📄 Facturas Emitidas":
+    st.subheader("📄 Registro y Gestión de Facturas Emitidas (CLP)")
+
+    with st.expander("➕ Emitir Nueva Factura", expanded=True):
+        with st.form("form_factura", clear_on_submit=True):
+            f1, f2 = st.columns(2)
+            with f1:
+                f_num_custom = st.text_input("Nº de Factura *", placeholder="Ej: 1024 o FAC-00125")
+                f_cli = st.text_input("Cliente *", placeholder="Ej: Empresa ABC SpA")
+                f_monto = st.number_input("Monto Total (CLP) *", min_value=1.0, step=10000.0)
+            with f2:
+                f_fecha = st.date_input("Fecha de Emisión", value=date.today())
+                f_estado = st.selectbox("Estado de Pago Inicial", ["Pendiente", "Pagado"])
+                f_timbrado = st.selectbox("Estado de Timbrado / Firma", ["Pendiente de Firma", "Firmado"])
+                banco_destino = st.selectbox("Si está Pagada, ¿a qué Banco ingresa?", ["Bice", "Falabella"])
+
+            sub_fact = st.form_submit_button("💾 Guardar Factura")
+            if sub_fact:
+                if not f_num_custom.strip():
+                    st.error("Debes ingresar el Nº de Factura.")
+                elif not f_cli.strip():
+                    st.error("Debes ingresar el nombre del cliente.")
+                else:
+                    new_id = f_num_custom.strip()
+                    m_pagado = f_monto if f_estado == "Pagado" else 0.0
+                    s_pendiente = 0.0 if f_estado == "Pagado" else f_monto
+                    datos_fac = [new_id, f_cli.strip(), f_monto, str(f_fecha), f_estado, m_pagado, s_pendiente, f_timbrado]
+                    ok, err = agregar_fila("Facturas", datos_fac, HEADERS_FACTURAS)
+                    
+                    if ok:
+                        if f_estado == "Pagado":
+                            id_m = f"MOV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                            reg_mov = [id_m, banco_destino, "Ingreso", f_monto, str(f_fecha), f_cli.strip(), f"Pago de Factura Nº {new_id}"]
+                            agregar_fila("Movimientos_Banco", reg_mov, HEADERS_MOVIMIENTOS)
+                            
+                            st.session_state["ultimo_recibo"] = {
+                                "num_fac": new_id,
+                                "cliente": f_cli.strip(),
+                                "monto": f_monto,
+                                "fecha": str(f_fecha),
+                                "banco": banco_destino
+                            }
+                        st.success(f"Factura Nº {new_id} registrada correctamente.")
+                        st.rerun()
+                    else:
+                        st.error(f"Error al guardar: {err}")
+
+    if "ultimo_recibo" in st.session_state:
+        rec = st.session_state["ultimo_recibo"]
         st.markdown(
-            """
-            <div style='background: #1e293b; color: white; padding: 25px; border-radius: 15px; text-align: center; margin-bottom: 20px;'>
-                <h2 style='margin: 0; color: white;'>🔒 ACCESO RESTRINGIDO</h2>
-                <p style='color: #94a3b8; margin: 8px 0 0 0;'>Sistema de Facturación - Banco Itaú</p>
+            f"""
+            <div class='recibo-box'>
+                <h3 style='color: #15803d; margin-top: 0;'>🧾 RECIBO DE DINERO GENERADO</h3>
+                <p><b>Recibimos de:</b> {rec['cliente']}<br>
+                <b>Monto Pago:</b> ${rec['monto']:,.0f} CLP<br>
+                <b>Concepto:</b> Pago de Factura Nº {rec['num_fac']}<br>
+                <b>Fecha Pago:</b> {rec['fecha']} | <b>Banco Destino:</b> {rec['banco']}<br>
+                <b>Emitido por:</b> Grafimaster</p>
             </div>
             """,
             unsafe_allow_html=True
         )
+        txt_recibo = f"🧾 *RECIBO DE DINERO - GRAFIMASTER*\n\nRecibimos de *{rec['cliente']}* la suma de *$ {rec['monto']:,.0f} CLP* en concepto de pago de Factura Nº *{rec['num_fac']}* con fecha *{rec['fecha']}* (Ingresado a {rec['banco']}).\n\n¡Muchas gracias por su preferencia!"
+        url_wa = f"https://api.whatsapp.com/send?text={urllib.parse.quote(txt_recibo)}"
+        
+        c_wa, c_close = st.columns([1, 1])
+        with c_wa:
+            st.markdown(f'<a href="{url_wa}" target="_blank" style="text-decoration:none;"><div style="background:#22c55e;color:white;padding:10px;border-radius:8px;text-align:center;font-weight:bold;">🟢 Enviar Recibo por WhatsApp</div></a>', unsafe_allow_html=True)
+        with c_close:
+            if st.button("❌ Cerrar Vista de Recibo"):
+                del st.session_state["ultimo_recibo"]
+                st.rerun()
 
-        with st.form("form_login"):
-            password_ingresada = st.text_input("Contraseña de Acceso", type="password", placeholder="••••••••")
-            submit = st.form_submit_button("Ingresar al Sistema", use_container_width=True)
+    st.markdown("### 📚 Listado de Facturas Emitidas")
+    df_fac = obtener_datos("Facturas", HEADERS_FACTURAS)
 
-            if submit:
-                if hmac.compare_digest(password_ingresada, clave_correcta):
-                    st.session_state["autenticado"] = True
-                    st.success("Acceso concedido.")
-                    st.rerun()
-                else:
-                    st.error("❌ Contraseña incorrecta. Intente nuevamente.")
+    if not df_fac.empty:
+        for idx, r in df_fac.iterrows():
+            id_f = str(r.get("nº_factura", r.get("n°_factura", r.get("id_factura", r.get("col_0", "")))))
+            cli_f = str(r.get("cliente", r.get("col_1", "")))
+            try:
+                monto_f = float(r.get("monto_clp", r.get("monto_usd", r.get("col_2", 0))))
+            except Exception:
+                monto_f = 0.0
+            fecha_f = str(r.get("fecha_emision", r.get("col_3", "")))
+            estado_f = str(r.get("estado", r.get("col_4", "Pendiente")))
+            try:
+                pagado_f = float(r.get("monto_pagado", r.get("col_5", 0)))
+            except Exception:
+                pagado_f = 0.0
+            try:
+                saldo_f = float(r.get("saldo_pendiente", r.get("col_6", monto_f)))
+            except Exception:
+                saldo_f = monto_f
+            timbrado_f = str(r.get("estado_timbrado", r.get("col_7", "Pendiente de Firma")))
 
-    st.stop()
+            fila_num = r.get("_fila_num")
 
-verificar_autenticacion()
+            col_info, col_acc = st.columns([0.8, 0.2])
 
-with st.sidebar:
-    st.caption("👤 Sesión iniciada")
-    if st.button("🚪 Cerrar Sesión", use_container_width=True):
-        st.session_state["autenticado"] = False
-        st.rerun()
+            with col_info:
+                st.markdown(
+                    f"""
+                    <div style="background: white; padding: 15px; border-radius: 10px; border-left: 5px solid {'#22c55e' if estado_f == 'Pagado' else '#f59e0b'}; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
+                        📄 <b>Nº Factura:</b> {id_f} | 👤 <b>Cliente:</b> {cli_f} | 📅 <b>Fecha:</b> {fecha_f}<br>
+                        💵 <b>Monto Facturado:</b> ${monto_f:,.0f} CLP | 🟢 <b>Cobrado en Banco:</b> ${pagado_f:,.0f} CLP \vert{} ⏳ <b>Pendiente:</b>${saldo_f:,.0f} CLP<br>
+                        ✍️ <b>Estado Timbrado:</b> <span style="color: {'#16a34a' if timbrado_f == 'Firmado' else '#dc2626'}; font-weight: bold;">{timbrado_f}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-# -----------------------------------------------------------------------------
-#
+            with col_acc:
+                ca1, ca2 = st.columns(2)
+                with ca1:
+                    if st.button("✏️", key=f"edit_fac_{fila_num}_{idx}", help="Editar / Cobrar / Firmar Factura"):
+                        st.session_state[f"edit_fac_mode_{fila_num}"] = not st.session_state.get(f"edit_fac_mode_{fila_num}", False)
+                with ca2:
+                    if st.button("❌", key=f"del_fac_{fila_num}_{idx}", help="Eliminar Factura"):
+                        ok_del, err_del = eliminar_fila("Facturas", fila_num, HEADERS_FACTURAS)
+                        if ok_del:
+                            st.success("Factura eliminada.")
+                            st.rerun()
+                        else:
+                            st.error(f"Error borrando: {err_del}")
+
+            if st.session_state.get(f"edit_fac_mode_{fila_num}", False):
+                with st.container():
+                    st.info(f"✏️ **Editando / Registrar Cobro de Factura Nº:** {id_f}")
+                    with st.form(f"form_edit_fac_{fila_num}"):
+                        fe1, fe2 = st.columns(2)
+                        with fe1:
+                            id_f_edit = st.text_input("Nº de Factura", value=id_f, key=f"num_e_{fila_num}")
+                            cli_edit = st.text_input("Cliente", value=cli_f, key=f"cli_e_{fila_num}")
+                            monto_edit = st.number_input("Monto Total (CLP)", value=monto_f, min_value=1.0, step=10000.0, key=f"m_e_{fila_num}")
+                        with fe2:
+                            try:
+                                default_dt = pd.to_datetime(fecha_f).date()
+                            except Exception:
+                                default_dt = date.today()
+                            fecha_edit = st.date_input("Fecha Emisión", value=default_dt, key=f"f_e_{fila_num}")
+                            estado_edit = st.selectbox("Estado de Pago", ["Pendiente", "Pagado"], index=0 if estado_f == "Pendiente" else 1, key=f"est_e_{fila_num}")
+                            timbrado_edit = st.selectbox("Estado Timbrado / Firma", ["Pendiente de Firma", "Firmado"], index=0 if "Pendiente" in timbrado_f else 1, key=f"timb_e_{fila_num}")
+
+                        pagado_edit = st.number_input("Monto Cobrado que ingresa al Banco (CLP)", value=(monto_edit if estado_edit == "Pagado" else pagado_f), min_value=0.0, max_value=monto_edit, step=10000.0, key=f"pag_e_{fila_num}")
+                        banco_cobro = st.selectbox("Banco donde se deposita el cobro", ["Bice", "Falabella"], key=f"bco_e_{fila_num}")
+
+                        btn_save_fac = st.form_submit_button("💾 Guardar y Generar Recibo")
+
+                        if btn_save_fac:
+                            saldo_calc = max(0.0, monto_edit - pagado_edit)
+                            estado_final = "Pagado" if saldo
