@@ -441,7 +441,7 @@ elif menu == "📄 Facturas Emitidas":
                     f"""
                     <div style="background: white; padding: 15px; border-radius: 10px; border-left: 5px solid {'#22c55e' if estado_f == 'Pagado' else '#f59e0b'}; margin-bottom: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.05);">
                         📄 <b>Nº Factura:</b> {id_f} | 👤 <b>Cliente:</b> {cli_f} | 📅 <b>Fecha:</b> {fecha_f}<br>
-                        💵 <b>Monto Facturado:</b> ${monto_f:,.0f} | 🟢 <b>Cobrado en Banco:</b> ${pagado_f:,.0f} \vert{} ⏳ <b>Pendiente:</b>${saldo_f:,.0f}<br>
+                        💵 <b>Monto Facturado:</b> ${monto_f:,.0f} | 🟢 <b>Cobrado en Banco:</b> ${pagado_f:,.0f} | ⏳ <b>Pendiente:</b> ${saldo_f:,.0f}<br>
                         ✍️ <b>Estado Timbrado:</b> <span style="color: {'#16a34a' if timbrado_f == 'Firmado' else '#dc2626'}; font-weight: bold;">{timbrado_f}</span>
                     </div>
                     """,
@@ -466,4 +466,155 @@ elif menu == "📄 Facturas Emitidas":
                 with st.container():
                     st.info(f"✏️ **Editando / Registrar Cobro de Factura Nº:** {id_f}")
                     with st.form(f"form_edit_fac_{fila_num}"):
-                        fe1, fe2 = st.columns(2
+                        fe1, fe2 = st.columns(2)
+                        with fe1:
+                            id_f_edit = st.text_input("Nº de Factura", value=id_f, key=f"num_e_{fila_num}")
+                            cli_edit = st.text_input("Cliente", value=cli_f, key=f"cli_e_{fila_num}")
+                            monto_edit = st.number_input("Monto Total", value=monto_f, min_value=1.0, step=10000.0, key=f"m_e_{fila_num}")
+                        with fe2:
+                            try:
+                                default_dt = pd.to_datetime(fecha_f).date()
+                            except Exception:
+                                default_dt = date.today()
+                            fecha_edit = st.date_input("Fecha Emisión", value=default_dt, key=f"f_e_{fila_num}")
+                            estado_edit = st.selectbox("Estado de Pago", ["Pendiente", "Pagado"], index=0 if estado_f == "Pendiente" else 1, key=f"est_e_{fila_num}")
+                            timbrado_edit = st.selectbox("Estado Timbrado / Firma", ["Pendiente de Firma", "Firmado"], index=0 if "Pendiente" in timbrado_f else 1, key=f"timb_e_{fila_num}")
+
+                        pagado_edit = st.number_input("Monto Cobrado que ingresa al Banco", value=(monto_edit if estado_edit == "Pagado" else pagado_f), min_value=0.0, max_value=monto_edit, step=10000.0, key=f"pag_e_{fila_num}")
+                        banco_cobro = st.selectbox("Banco donde se deposita el cobro", ["Bice", "Falabella"], key=f"bco_e_{fila_num}")
+
+                        btn_save_fac = st.form_submit_button("💾 Guardar y Generar Recibo")
+
+                        if btn_save_fac:
+                            saldo_calc = max(0.0, monto_edit - pagado_edit)
+                            estado_final = "Pagado" if saldo_calc == 0.0 else estado_edit
+                            
+                            datos_act = [
+                                id_f_edit.strip(),
+                                cli_edit.strip(),
+                                monto_edit,
+                                str(fecha_edit),
+                                estado_final,
+                                pagado_edit,
+                                saldo_calc,
+                                timbrado_edit
+                            ]
+                            ok_upd, err_upd = actualizar_fila("Facturas", fila_num, datos_act, HEADERS_FACTURAS)
+                            
+                            if ok_upd:
+                                diferencia_cobrada = pagado_edit - pagado_f
+                                if diferencia_cobrada > 0:
+                                    id_m = f"MOV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                                    reg_mov = [id_m, banco_cobro, "Ingreso", diferencia_cobrada, str(date.today()), cli_edit.strip(), f"Abono / Pago de Factura Nº {id_f_edit}"]
+                                    agregar_fila("Movimientos_Banco", reg_mov, HEADERS_MOVIMIENTOS)
+
+                                    st.session_state["ultimo_recibo"] = {
+                                        "num_fac": id_f_edit.strip(),
+                                        "cliente": cli_edit.strip(),
+                                        "monto": diferencia_cobrada,
+                                        "fecha": str(date.today()),
+                                        "banco": banco_cobro
+                                    }
+
+                                st.success("Factura y banco actualizados correctamente.")
+                                st.session_state[f"edit_fac_mode_{fila_num}"] = False
+                                st.rerun()
+                            else:
+                                st.error(f"Error al actualizar: {err_upd}")
+    else:
+        st.info("No hay facturas emitidas.")
+
+# =============================================================================
+# MÓDULO 3: REGISTRO DE MOVIMIENTOS
+# =============================================================================
+elif menu == "💳 Movimientos Bancarios":
+    st.subheader("💸 Registrar Movimiento Directo de Banco")
+
+    with st.form("form_movimiento", clear_on_submit=True):
+        cm1, cm2, cm3 = st.columns(3)
+        with cm1:
+            banco_sel = st.selectbox("Banco *", ["Bice", "Falabella"])
+        with cm2:
+            tipo_mov = st.selectbox("Tipo *", ["Ingreso", "Egreso"])
+        with cm3:
+            monto_mov = st.number_input("Monto *", min_value=1.0, step=10000.0)
+
+        cm4, cm5 = st.columns(2)
+        with cm4:
+            fecha_mov = st.date_input("Fecha", value=date.today())
+        with cm5:
+            cliente_mov = st.text_input("Cliente / Proveedor / Detalle")
+
+        detalle_mov = st.text_area("Observaciones")
+
+        sub_mov = st.form_submit_button("💾 Registrar Movimiento")
+        if sub_mov:
+            id_m = f"MOV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            registro_mov = [id_m, banco_sel, tipo_mov, monto_mov, str(fecha_mov), cliente_mov.strip(), detalle_mov.strip()]
+            ok, err = agregar_fila("Movimientos_Banco", registro_mov, HEADERS_MOVIMIENTOS)
+            if ok:
+                st.success("Movimiento registrado en el banco.")
+                st.rerun()
+            else:
+                st.error(f"Error: {err}")
+
+# =============================================================================
+# MÓDULO 4: TRANSFERENCIAS ENTRE BANCOS
+# =============================================================================
+elif menu == "🔄 Transferir Entre Bancos":
+    st.subheader("🔄 Traspaso de Fondos entre Bancos")
+
+    with st.form("form_traspaso", clear_on_submit=True):
+        ct1, ct2 = st.columns(2)
+        with ct1:
+            banco_origen = st.selectbox("Banco de ORIGEN (Sale dinero) *", ["Bice", "Falabella"], index=0)
+        with ct2:
+            banco_destino = st.selectbox("Banco de DESTINO (Entra dinero) *", ["Falabella", "Bice"], index=0)
+
+        ct3, ct4 = st.columns(2)
+        with ct3:
+            monto_traspaso = st.number_input("Monto a Transferir *", min_value=1.0, step=50000.0)
+        with ct4:
+            fecha_traspaso = st.date_input("Fecha del Traspaso", value=date.today())
+
+        glosa_traspaso = st.text_input("Motivo / Observaciones del Traspaso", value="Traspaso interno de fondos")
+
+        sub_traspaso = st.form_submit_button("🔁 Ejecutar Transferencia")
+
+        if sub_traspaso:
+            if banco_origen == banco_destino:
+                st.error("El banco de origen y destino deben ser diferentes.")
+            else:
+                id_egr = f"TRF-OUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                reg_egr = [id_egr, banco_origen, "Egreso", monto_traspaso, str(fecha_traspaso), "Traspaso Interno", f"{glosa_traspaso} (Hacia {banco_destino})"]
+                ok1, err1 = agregar_fila("Movimientos_Banco", reg_egr, HEADERS_MOVIMIENTOS)
+
+                id_ing = f"TRF-IN-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                reg_ing = [id_ing, banco_destino, "Ingreso", monto_traspaso, str(fecha_traspaso), "Traspaso Interno", f"{glosa_traspaso} (Desde {banco_origen})"]
+                ok2, err2 = agregar_fila("Movimientos_Banco", reg_ing, HEADERS_MOVIMIENTOS)
+
+                if ok1 and ok2:
+                    st.success(f"✅ Transferencia realizada: ${monto_traspaso:,.0f} de {banco_origen} a {banco_destino}.")
+                    st.rerun()
+                else:
+                    st.error(f"Error registrando transferencia: {err1 or err2}")
+
+# =============================================================================
+# MÓDULO 5: SALDOS INICIALES
+# =============================================================================
+elif menu == "⚙️ Configurar Saldos Iniciales":
+    st.subheader("⚙️ Definir Saldos Iniciales en Bancos")
+
+    with st.form("form_saldos_ini"):
+        s_bice = st.number_input("Saldo Inicial BICE", min_value=0.0, step=100000.0)
+        s_fala = st.number_input("Saldo Inicial Falabella", min_value=0.0, step=100000.0)
+
+        sub_ini = st.form_submit_button("💾 Guardar Saldos Iniciales")
+        if sub_ini:
+            ok1, _ = agregar_fila("Config_Bancos", ["Bice", s_bice], HEADERS_CONFIG)
+            ok2, _ = agregar_fila("Config_Bancos", ["Falabella", s_fala], HEADERS_CONFIG)
+            if ok1 and ok2:
+                st.success("Saldos iniciales guardados.")
+                st.rerun()
+            else:
+                st.error("Error al guardar saldos iniciales.")
