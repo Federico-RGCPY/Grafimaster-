@@ -149,26 +149,4 @@ def cargar_datos():
         df_c = pd.DataFrame(rec_c)
         
         saldo_inicial = 0.0
-        if not df_c.empty and "Clave" in df_c.columns and "Valor" in df_c.columns:
-            config_dict = dict(zip(df_c["Clave"], df_c["Valor"]))
-            try:
-                saldo_inicial = float(config_dict.get("Saldo_Inicial", 0.0))
-            except ValueError:
-                saldo_inicial = 0.0
-
-        # Parsear tipos de datos numéricos y fechas
-        if not df_f.empty:
-            df_f["Monto_PYG"] = pd.to_numeric(df_f["Monto_PYG"], errors='coerce').fillna(0.0)
-            df_f["Monto_Pagado"] = pd.to_numeric(df_f["Monto_Pagado"], errors='coerce').fillna(0.0)
-            df_f["Fecha"] = pd.to_datetime(df_f["Fecha"], errors='coerce').dt.date
-
-        if not df_b.empty:
-            df_b["Monto_PYG"] = pd.to_numeric(df_b["Monto_PYG"], errors='coerce').fillna(0.0)
-            df_b["Fecha"] = pd.to_datetime(df_b["Fecha"], errors='coerce').dt.date
-
-        st.session_state.facturas = df_f
-        st.session_state.banco = df_b
-        st.session_state.saldo_inicial = saldo_inicial
-
-    except Exception as e:
-        st.error(f"⚠️ Error conectando a Google
+        if not df_c.empty and "
