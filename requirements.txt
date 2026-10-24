@@ -1,5 +1,7 @@
 streamlit==1.40.0
 starlette==0.41.3
+st-gsheets-connection
+plotly
 pandas
 gspread
 google-auth
